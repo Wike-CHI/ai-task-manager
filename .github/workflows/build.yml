@@ -1,0 +1,52 @@
+name: build
+
+on:
+  push:
+    branches: [main]
+    tags: ["v*"]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  windows:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup MSVC
+        uses: ilammy/msvc-dev-cmd@v1
+
+      - name: Build
+        shell: cmd
+        run: |
+          if not exist build mkdir build
+          rc /nologo /fo build\app.res app.rc
+          cl /nologo /std:c++17 /EHsc /O2 /utf-8 /W3 ^
+             /Fo:build\ ^
+             src\main.cpp ^
+             build\app.res ^
+             /Fe:AITaskManager.exe ^
+             user32.lib gdi32.lib comctl32.lib psapi.lib shell32.lib dwmapi.lib msimg32.lib advapi32.lib
+
+      - name: Show artifact
+        shell: pwsh
+        run: |
+          Get-Item AITaskManager.exe | Select-Object Name, Length, LastWriteTime
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: AITaskManager
+          path: AITaskManager.exe
+          retention-days: 30
+
+      - name: Release
+        if: startsWith(github.ref, 'refs/tags/v')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: AITaskManager.exe
+          generate_release_notes: true
+          draft: false
+          prerelease: false
