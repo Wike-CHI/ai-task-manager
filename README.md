@@ -210,6 +210,25 @@ python tools/make_mono.py
 
 > 踩坑备忘：局部变量别叫 `small`，`rpcndr.h` 里 `#define small char`，会编译报 `HICON 后跟 = 非法`。
 
+## 持续集成 / 发布
+
+`.github/workflows/build.yml`：
+
+| 触发 | 动作 |
+|---|---|
+| push 到 main / PR | 用 MSVC 编译，产物作为 artifact 存 30 天 |
+| 打 `v*` 标签 | 编译后自动创建 Release，附上 `AITaskManager.exe` |
+
+发新版流程：
+
+```bash
+git tag -a v0.1.1 -m "v0.1.1 — 修了什么"
+git push origin v0.1.1
+# 约 40 秒后 https://github.com/Wike-CHI/ai-task-manager/releases 出现新版本
+```
+
+Release 说明由 GitHub 自动生成（对比上个 tag 的提交），无需手写。
+
 ## 技术栈
 
 | 项 | 选型 |
