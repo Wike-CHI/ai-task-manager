@@ -103,6 +103,13 @@ static int g_histCount = 0;
 static int g_histHead = 0;
 static double g_weightsGB = 0;
 
+static void TrayAdd(HWND hwnd);
+static void TrayUpdateTip(const std::wstring& tip);
+static void TraySetIcon(HWND hwnd);
+static void TrayRemove();
+static void ShowFromTray(HWND hwnd);
+static void HideToTray(HWND hwnd);
+
 static const std::map<std::wstring, std::pair<Risk, const wchar_t*>> RISK_TABLE = {
     { L"system",              { RISK_PROTECTED, L"系统进程" } },
     { L"registry",            { RISK_PROTECTED, L"系统进程" } },
@@ -860,6 +867,9 @@ static void OnSnapshot(HWND hwnd, Snapshot* snap) {
                                  g_snap.ramUsedGB, g_snap.ramTotalGB, g_snap.ramPct,
                                  g_snap.comUsedGB, g_snap.comTotalGB, g_snap.comPct,
                                  g_snap.procCount, g_snap.cpuPct).c_str());
+    TrayUpdateTip(Fmt(L"内存 %.0f%% · 提交 %.0f%% · 显存 %.0f%%",
+                      g_snap.ramPct, g_snap.comPct,
+                      g_snap.vramTotal > 0 ? g_snap.vramUsed / g_snap.vramTotal * 100 : 0));
     g_busy = false;
 }
 
@@ -921,6 +931,108 @@ static int LoadThemePref() {           // -1 未设置, 0 深色, 1 玻璃
     return r;
 }
 
+// ------------------------------------------------------------------ 托盘
+static NOTIFYICONDATAW g_nid{};
+static bool g_trayAdded = false;
+static bool g_hiddenToTray = false;
+
+#define IDM_TRAY_SHOW  2001
+#define IDM_TRAY_REFRESH 2002
+#define IDM_TRAY_EXIT  2003
+
+static HICON TrayIconForTheme(HINSTANCE inst) {
+    int id = g_theme.glass ? 2 : 1;
+    return (HICON)LoadImageW(inst, MAKEINTRESOURCEW(id), IMAGE_ICON, 16, 16, LR_SHARED);
+}
+
+static void TrayAdd(HWND hwnd) {
+    if (g_trayAdded) return;
+    HINSTANCE inst = (HINSTANCE)GetWindowLongPtrW(hwnd, GWLP_HINSTANCE);
+
+    g_nid.cbSize = sizeof(g_nid);
+    g_nid.hWnd = hwnd;
+    g_nid.uID = 1;
+    g_nid.uFlags = NIF_ICON | NIF_MESSAGE | NIF_TIP;
+    g_nid.uCallbackMessage = WM_APP_SNAPSHOT + 1;
+    g_nid.hIcon = TrayIconForTheme(inst);
+    wcscpy_s(g_nid.szTip, L"AI 任务管理器");
+    g_trayAdded = Shell_NotifyIconW(NIM_ADD, &g_nid) != FALSE;
+}
+
+static void TrayUpdateTip(const std::wstring& tip) {
+    if (!g_trayAdded) return;
+    wcsncpy_s(g_nid.szTip, tip.c_str(), _TRUNCATE);
+    g_nid.uFlags = NIF_TIP;
+    Shell_NotifyIconW(NIM_MODIFY, &g_nid);
+}
+
+static void TraySetIcon(HWND hwnd) {
+    if (!g_trayAdded) return;
+    HINSTANCE inst = (HINSTANCE)GetWindowLongPtrW(hwnd, GWLP_HINSTANCE);
+    g_nid.uFlags = NIF_ICON;
+    g_nid.hIcon = TrayIconForTheme(inst);
+    Shell_NotifyIconW(NIM_MODIFY, &g_nid);
+}
+
+static void TrayRemove() {
+    if (!g_trayAdded) return;
+    Shell_NotifyIconW(NIM_DELETE, &g_nid);
+    g_trayAdded = false;
+}
+
+static void ShowFromTray(HWND hwnd) {
+    ShowWindow(hwnd, SW_SHOW);
+    ShowWindow(hwnd, SW_RESTORE);
+    SetForegroundWindow(hwnd);
+    g_hiddenToTray = false;
+}
+
+static void HideToTray(HWND hwnd) {
+    ShowWindow(hwnd, SW_HIDE);
+    g_hiddenToTray = true;
+
+    static bool hinted = false;
+    if (!hinted && g_trayAdded) {
+        g_nid.uFlags = NIF_INFO;
+        wcscpy_s(g_nid.szInfoTitle, L"还在后台运行");
+        wcscpy_s(g_nid.szInfo, L"双击托盘图标恢复窗口，右键有菜单。");
+        g_nid.dwInfoFlags = NIIF_INFO;
+        Shell_NotifyIconW(NIM_MODIFY, &g_nid);
+        hinted = true;
+    }
+}
+
+static void TrayMenu(HWND hwnd) {
+    POINT pt;
+    GetCursorPos(&pt);
+
+    HMENU menu = CreatePopupMenu();
+    AppendMenuW(menu, MF_STRING, IDM_TRAY_SHOW, g_hiddenToTray ? L"显示窗口" : L"隐藏窗口");
+    AppendMenuW(menu, MF_STRING, IDM_TRAY_REFRESH, L"立即刷新");
+    AppendMenuW(menu, MF_SEPARATOR, 0, nullptr);
+    AppendMenuW(menu, MF_STRING, IDM_TRAY_EXIT, L"退出");
+
+    SetForegroundWindow(hwnd);          // 不先设前台，菜单点外面不会消失
+    int cmd = (int)TrackPopupMenu(menu, TPM_RETURNCMD | TPM_RIGHTBUTTON,
+                                  pt.x, pt.y, 0, hwnd, nullptr);
+    DestroyMenu(menu);
+
+    switch (cmd) {
+    case IDM_TRAY_SHOW:
+        if (g_hiddenToTray) ShowFromTray(hwnd);
+        else HideToTray(hwnd);
+        break;
+    case IDM_TRAY_REFRESH:
+        RefreshAsync(hwnd);
+        break;
+    case IDM_TRAY_EXIT:
+        DestroyWindow(hwnd);
+        break;
+    default:
+        break;
+    }
+}
+
 static void ApplyMode(HWND hwnd, int mode) {
     ApplyTheme(ModeToGlass(mode));
     if (g_list) {
@@ -941,6 +1053,7 @@ static void ApplyMode(HWND hwnd, int mode) {
                                      LR_DEFAULTSIZE | LR_SHARED);
     HICON icoSmall = (HICON)LoadImageW(inst, MAKEINTRESOURCEW(iconId), IMAGE_ICON, 16, 16,
                                        LR_SHARED);
+    TraySetIcon(hwnd);
     if (icoBig) SendMessageW(hwnd, WM_SETICON, ICON_BIG, (LPARAM)icoBig);
     if (icoSmall) SendMessageW(hwnd, WM_SETICON, ICON_SMALL, (LPARAM)icoSmall);
     RedrawWindow(hwnd, nullptr, nullptr, RDW_INVALIDATE | RDW_ALLCHILDREN | RDW_FRAME);
@@ -1009,10 +1122,27 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
         AppendChat(L"· 为什么卡？   · 谁在吃内存？");
         AppendChat(L"· 关掉哪些？   · 模型占多少？");
         AppendChat(L"顶部曲线是最近 3 分钟的内存 / 提交 / 显存走势。");
+        AppendChat(L"点右上角 × 会收到托盘；双击托盘图标恢复，右键有菜单。");
+
+        TrayAdd(hwnd);
+        if (!g_trayAdded) AppendChat(L"托盘图标添加失败（Shell_NotifyIcon 返回失败）。");
         return 0;
     }
     case WM_APP_SNAPSHOT:
-        OnSnapshot(hwnd, (Snapshot*)lp);
+        if (lp) OnSnapshot(hwnd, (Snapshot*)lp);   // 防御：外部误投递会被丢弃
+        return 0;
+
+    case WM_APP_SNAPSHOT + 1:               // 托盘回调
+        if (LOWORD(lp) == WM_LBUTTONUP || LOWORD(lp) == WM_LBUTTONDBLCLK) {
+            if (g_hiddenToTray) ShowFromTray(hwnd);
+            else HideToTray(hwnd);
+        } else if (LOWORD(lp) == WM_RBUTTONUP || LOWORD(lp) == WM_CONTEXTMENU) {
+            TrayMenu(hwnd);
+        }
+        return 0;
+
+    case WM_CLOSE:                          // 关窗 = 收托盘，不退出
+        HideToTray(hwnd);
         return 0;
 
     case WM_ERASEBKGND:
@@ -1203,6 +1333,7 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
         RefreshAsync(hwnd);
         return 0;
     case WM_DESTROY:
+        TrayRemove();
         KillTimer(hwnd, TIMER_ID);
         PostQuitMessage(0);
         return 0;
