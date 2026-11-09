@@ -78,6 +78,36 @@ Win10 上这几个属性不支持，调用直接失败——不会报错，标�
 
 真正的退出只有两条路：托盘菜单「退出」，或任务管理器结束进程。
 
+## 温度与散热
+
+![温度](docs/thermal.png)
+
+| 传感器 | 来源 | 刷新 |
+|---|---|---|
+| GPU 温度、风扇转速 | `nvidia-smi --query-gpu=temperature.gpu,fan.speed` | 2 秒 |
+| NVMe / SSD 温度 | `Get-StorageReliabilityCounter`（WMI） | 30 秒 |
+| ACPI 热区温度 | `MSAcpi_ThermalZoneTemperature`（取最高那一个） | 30 秒 |
+
+温度直接显示在状态栏，也会进分析：`· 温度：GPU 44°C（风扇 47%），磁盘 60°C，ACPI 28°C（GPU 20 秒内降 3°C，47→44）`。
+
+散热评估规则：
+
+- GPU ≥83°C **且** 风扇 ≥85% → 散热可能受阻（积灰 / 风道 / 环境温度）
+- GPU ≥83°C 但风扇没拉满 → 建议检查风扇曲线
+- 风扇 ≥90% 而 GPU <60°C → 散热余量充足
+
+### 关于「单独控制风扇」
+
+**本工具不提供风扇控制**，这是 Windows 平台的限制，不是偷懒：
+
+| 目标 | 可行性 |
+|---|---|
+| 显卡风扇 | `nvidia-smi` 在 Windows 下**只读**（本机已验证无 `--fan-speed`），要用 NVIDIA 控制面板或 MSI Afterburner |
+| 主板 / CPU 风扇 | 无标准 API，需厂商工具（AI Suite / MSI Center / Lenovo Vantage）或进 BIOS 调曲线 |
+| 通用方案 | 必须装内核驱动直接读写 Super I/O（如 WinRing0），会被杀软拦、有蓝屏风险 |
+
+所以这里只做**读取 + 趋势 + 判断**：告诉你要不要关注散热，改转速还是交给厂商工具。
+
 ## 悬浮球
 
 ![悬浮球](docs/ball.png)

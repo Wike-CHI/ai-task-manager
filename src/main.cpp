@@ -58,6 +58,7 @@ static const wchar_t* APP_TITLE = L"AI 任务管理器";
 #define IDM_TRAY_BALL    2101
 #define IDM_TRAY_CLEAN   2102
 #define IDM_TRAY_AUTO    2103
+#define IDM_TRAY_THERM   2104
 #define HEADER_H   276
 #define HIST_MAX   90
 #define TIMER_ID   1
@@ -86,7 +87,7 @@ struct ProcRow {
     std::vector<DWORD> pids;
 };
 
-struct Sample { double ram, com, vram, gpu; };
+struct Sample { double ram, com, vram, gpu, gpuT, cpuT; };
 
 struct Snapshot {
     double ramUsedGB = 0, ramTotalGB = 0, ramPct = 0;
@@ -205,18 +206,79 @@ static void RunHidden(const std::wstring& cmd, std::wstring& out) {
     if (n) MultiByteToWideChar(CP_UTF8, 0, s.c_str(), (int)s.size(), out.data(), n);
 }
 
+// ------------------------------------------------------------------ 温度采集
+struct Temps {
+    double gpu = 0, fan = 0;        // 显卡温度、风扇转速(%)
+    double cpu = -1, disk = -1;     // ACPI 热区、磁盘温度；-1 表示读不到
+    double gpu1minAgo = -1;
+    DWORD  lastSlow = 0;
+};
+
+static Temps g_temps;
+
+static void WriteTempScript() {
+    wchar_t tmp[MAX_PATH];
+    GetTempPathW(MAX_PATH, tmp);
+    std::wstring path = std::wstring(tmp) + L"aitm_temp.ps1";
+
+    // 必须 UTF-8 with BOM：脚本宿主按 ANSI 读无 BOM 的文件，中文/符号会全乱
+    const std::wstring script =
+        L"$z = Get-CimInstance -Namespace root/wmi -ClassName MSAcpi_ThermalZoneTemperature "
+        L"-ErrorAction SilentlyContinue | Sort-Object CurrentTemperature -Descending | Select-Object -First 1\r\n"
+        L"$d = Get-PhysicalDisk | ForEach-Object { ($_ | Get-StorageReliabilityCounter "
+        L"-ErrorAction SilentlyContinue).Temperature } | Where-Object { $_ -gt 0 } | "
+        L"Select-Object -First 1\r\n"
+        L"$cpu = if ($z) { [math]::Round($z.CurrentTemperature/10 - 273.15, 1) } else { -1 }\r\n"
+        L"$disk = if ($d) { $d } else { -1 }\r\n"
+        L"Write-Output (\"{0};{1}\" -f $cpu, $disk)\r\n";
+
+    int n = WideCharToMultiByte(CP_UTF8, 0, script.c_str(), (int)script.size(),
+                                nullptr, 0, nullptr, nullptr);
+    std::string utf8(n, 0);
+    WideCharToMultiByte(CP_UTF8, 0, script.c_str(), (int)script.size(),
+                        utf8.data(), n, nullptr, nullptr);
+
+    HANDLE h = CreateFileW(path.c_str(), GENERIC_WRITE, 0, nullptr, CREATE_ALWAYS,
+                           FILE_ATTRIBUTE_NORMAL, nullptr);
+    if (h == INVALID_HANDLE_VALUE) return;
+    DWORD written = 0;
+    const unsigned char bom[3] = { 0xEF, 0xBB, 0xBF };
+    WriteFile(h, bom, 3, &written, nullptr);
+    WriteFile(h, utf8.data(), (DWORD)utf8.size(), &written, nullptr);
+    CloseHandle(h);
+}
+
+static void SampleSlowTemps() {
+    wchar_t tmp[MAX_PATH];
+    GetTempPathW(MAX_PATH, tmp);
+    std::wstring path = std::wstring(tmp) + L"aitm_temp.ps1";
+    std::wstring cmd = L"powershell -NoProfile -ExecutionPolicy Bypass -File \"" + path + L"\"";
+    std::wstring out;
+    RunHidden(cmd, out);
+
+    double cpu = -1, disk = -1;
+    if (swscanf_s(out.c_str(), L"%lf;%lf", &cpu, &disk) >= 1) {
+        if (cpu > 0 && cpu < 120) g_temps.cpu = cpu;
+        if (disk > 0 && disk < 120) g_temps.disk = disk;
+    }
+    g_temps.lastSlow = GetTickCount();
+}
+
 static void ReadGpu(Snapshot& s) {
     std::wstring out;
     RunHidden(L"cmd /c \"\"C:\\Windows\\System32\\nvidia-smi.exe\" --query-gpu=utilization.gpu,"
-              L"memory.used,memory.total,temperature.gpu --format=csv,noheader,nounits\"", out);
+              L"memory.used,memory.total,temperature.gpu,fan.speed --format=csv,noheader,nounits\"", out);
     if (out.empty()) { s.hasGpu = false; return; }
-    double a = 0, b = 0, c = 0, d = 0;
-    if (swscanf_s(out.c_str(), L"%lf , %lf , %lf , %lf", &a, &b, &c, &d) >= 3) {
+    double a = 0, b = 0, c = 0, d = 0, fan = 0;
+    int n = swscanf_s(out.c_str(), L"%lf , %lf , %lf , %lf , %lf", &a, &b, &c, &d, &fan);
+    if (n >= 3) {
         s.hasGpu = true;
         s.gpuUtil = a;
         s.vramUsed = b / 1024.0;
         s.vramTotal = c / 1024.0;
         s.gpuTemp = d;
+        g_temps.gpu = d;
+        if (n >= 5) g_temps.fan = fan;
     }
 }
 
@@ -268,6 +330,13 @@ static void Collect(Snapshot& s) {
     }
 
     ReadGpu(s);
+
+    static std::atomic<bool> slowBusy{false};
+    if (!slowBusy && GetTickCount() - g_temps.lastSlow > 30000) {
+        slowBusy = true;
+        std::thread([]() { SampleSlowTemps(); slowBusy = false; }).detach();
+    }
+
     s.modelRunning = false;
     s.modelMemGB = 0;
 
@@ -364,6 +433,20 @@ static std::wstring TrendText() {
     return L"提交最近 30 秒基本持平";
 }
 
+static std::wstring TempTrendText() {
+    if (g_histCount < 12 || g_temps.gpu <= 0) return L"";
+    auto at = [&](int back) {
+        int idx = (g_histHead - 1 - back + HIST_MAX * 2) % HIST_MAX;
+        return g_hist[idx];
+    };
+    double now = g_temps.gpu, before = at(10).gpuT;   // 约 20 秒前
+    if (before <= 0) return L"";
+    double d = now - before;
+    if (d >= 2) return Fmt(L"（GPU 20 秒内升 %.0f°C，%.0f→%.0f）", d, before, now);
+    if (d <= -2) return Fmt(L"（GPU 20 秒内降 %.0f°C，%.0f→%.0f）", -d, before, now);
+    return L"（GPU 温度平稳）";
+}
+
 static std::wstring AnalyzeWhy(const Snapshot& s) {
     std::wstring out;
     bool ramHigh = s.ramPct >= 88;
@@ -391,6 +474,21 @@ static std::wstring AnalyzeWhy(const Snapshot& s) {
                    s.gpuUtil, s.vramUsed, s.vramTotal, s.cpuPct);
     else
         out += Fmt(L"· CPU %.0f%%（没有检测到 N 卡）\r\n", s.cpuPct);
+
+    if (g_temps.gpu > 0) {
+        out += Fmt(L"· 温度：GPU %.0f°C（风扇 %.0f%%）", g_temps.gpu, g_temps.fan);
+        if (g_temps.disk > 0) out += Fmt(L"，磁盘 %.0f°C", g_temps.disk);
+        if (g_temps.cpu > 0) out += Fmt(L"，ACPI %.0f°C", g_temps.cpu);
+        out += TempTrendText();
+        out += L"\r\n";
+
+        if (g_temps.gpu >= 83 && g_temps.fan >= 85)
+            out += L"  ⚠ 显卡高温 + 高转速同时出现，散热可能受阻（积灰 / 风道 / 环境温度）\r\n";
+        else if (g_temps.gpu >= 83)
+            out += L"  ⚠ 显卡温度偏高而风扇未拉满，可检查风扇曲线\r\n";
+        else if (g_temps.fan >= 90 && g_temps.gpu < 60)
+            out += L"  散热余量充足（风扇高转速但温度低）\r\n";
+    }
 
     out += L"\r\n内存前 5：\r\n";
     int n = 0;
@@ -456,6 +554,22 @@ static std::wstring AnswerQuestion(const std::wstring& q, const Snapshot& s) {
         }
         if (i == 1) out += L"• 目前没有标记为「可关」的进程。\r\n";
         out += Fmt(L"\r\n合计可释放 %.1f GB。点「执行建议」可以直接关（会二次确认）。", gain / 1024.0);
+        return out;
+    }
+    if (has(L"风扇") || has(L"散热") || has(L"温度")) {
+        std::wstring out = L"当前温度：\r\n\r\n";
+        if (g_temps.gpu > 0)
+            out += Fmt(L"· GPU %.0f°C，风扇 %.0f%%\r\n", g_temps.gpu, g_temps.fan);
+        if (g_temps.disk > 0) out += Fmt(L"· NVMe %.0f°C\r\n", g_temps.disk);
+        if (g_temps.cpu > 0) out += Fmt(L"· ACPI 热区 %.0f°C（主板/机箱附近，不是核心温度）\r\n", g_temps.cpu);
+
+        out += L"\r\n关于控制风扇：\r\n"
+               L"· GPU：Windows 下 nvidia-smi 只能读不能写（本机确认无 --fan-speed），"
+               L"要改转速得用 NVIDIA 控制面板或 MSI Afterburner。\r\n"
+               L"· 主板/CPU 风扇：没有标准接口，得用厂商工具（华硕 AI Suite、微星 Center、"
+               L"联想 Vantage）或进 BIOS 调风扇曲线。\r\n"
+               L"· 通用做法要装内核驱动直接读写 Super I/O（如 WinRing0），"
+               L"这类驱动会被杀软拦、也有蓝屏风险，本工具不做。\r\n";
         return out;
     }
     if (has(L"内存") || has(L"卡") || has(L"慢") || has(L"为什么")) return AnalyzeWhy(s);
@@ -530,7 +644,8 @@ static void FillList() {
 
 static void PushHistory(const Snapshot& s) {
     Sample x{ s.ramPct, s.comPct,
-              s.vramTotal > 0 ? s.vramUsed / s.vramTotal * 100.0 : 0.0, s.gpuUtil };
+              s.vramTotal > 0 ? s.vramUsed / s.vramTotal * 100.0 : 0.0, s.gpuUtil,
+              g_temps.gpu, g_temps.cpu };
     g_hist[g_histHead] = x;
     g_histHead = (g_histHead + 1) % HIST_MAX;
     if (g_histCount < HIST_MAX) g_histCount++;
@@ -872,11 +987,17 @@ static void OnSnapshot(HWND hwnd, Snapshot* snap) {
 
     SYSTEMTIME st;
     GetLocalTime(&st);
-    SetWindowTextW(g_status, Fmt(L"%02d:%02d:%02d   内存 %.1f/%.1f GB（%.0f%%）   提交 %.1f/%.1f GB（%.0f%%）   进程 %d   CPU %.0f%%",
-                                 st.wHour, st.wMinute, st.wSecond,
-                                 g_snap.ramUsedGB, g_snap.ramTotalGB, g_snap.ramPct,
-                                 g_snap.comUsedGB, g_snap.comTotalGB, g_snap.comPct,
-                                 g_snap.procCount, g_snap.cpuPct).c_str());
+    {
+        std::wstring t = Fmt(L"%02d:%02d:%02d   内存 %.1f/%.1f（%.0f%%）  提交 %.1f/%.1f（%.0f%%）  进程 %d  CPU %.0f%%",
+                             st.wHour, st.wMinute, st.wSecond,
+                             g_snap.ramUsedGB, g_snap.ramTotalGB, g_snap.ramPct,
+                             g_snap.comUsedGB, g_snap.comTotalGB, g_snap.comPct,
+                             g_snap.procCount, g_snap.cpuPct);
+        if (g_temps.gpu > 0) t += Fmt(L"   GPU %.0f°C/风扇%.0f%%", g_temps.gpu, g_temps.fan);
+        if (g_temps.disk > 0) t += Fmt(L"   磁盘 %.0f°C", g_temps.disk);
+        if (g_temps.cpu > 0) t += Fmt(L"   ACPI %.0f°C", g_temps.cpu);
+        SetWindowTextW(g_status, t.c_str());
+    }
     if (g_ball && IsWindowVisible(g_ball)) InvalidateRect(g_ball, nullptr, FALSE);
 
     TrayUpdateTip(Fmt(L"内存 %.0f%% · 提交 %.0f%% · 显存 %.0f%%",
@@ -1290,6 +1411,7 @@ static void TrayMenu(HWND hwnd) {
     AppendMenuW(menu, MF_SEPARATOR, 0, nullptr);
     AppendMenuW(menu, MF_STRING | (g_ballOn ? MF_CHECKED : 0), IDM_TRAY_BALL, L"内存悬浮球");
     AppendMenuW(menu, MF_STRING, IDM_TRAY_CLEAN, L"清理内存");
+    AppendMenuW(menu, MF_STRING, IDM_TRAY_THERM, L"温度与风扇");
     AppendMenuW(menu, MF_STRING | (AutostartEnabled() ? MF_CHECKED : 0), IDM_TRAY_AUTO, L"开机自启");
     AppendMenuW(menu, MF_SEPARATOR, 0, nullptr);
     AppendMenuW(menu, MF_STRING, IDM_TRAY_EXIT, L"退出");
@@ -1310,6 +1432,7 @@ static void TrayMenu(HWND hwnd) {
     case IDM_TRAY_BALL:
     case IDM_TRAY_CLEAN:
     case IDM_TRAY_AUTO:
+    case IDM_TRAY_THERM:
         PostMessageW(hwnd, WM_COMMAND, MAKEWPARAM(cmd, 0), 0);
         break;
     case IDM_TRAY_EXIT:
@@ -1574,6 +1697,10 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
                 auto* payload = new CleanResult(r);
                 PostMessageW(hwnd, WM_APP_SNAPSHOT + 2, 0, (LPARAM)payload);
             }).detach();
+        } else if (id == IDM_TRAY_THERM) {
+            AppendChat(L"你：温度与风扇");
+            AppendChat(AnswerQuestion(L"散热", g_snap));
+            if (g_hiddenToTray) ShowFromTray(hwnd);
         } else if (id == IDM_TRAY_AUTO) {
             bool on = !AutostartEnabled();
             SetAutostart(on);
@@ -1707,6 +1834,7 @@ static void ApplyCaptionTheme(HWND hwnd) {
 
 int WINAPI wWinMain(HINSTANCE hInst, HINSTANCE, LPWSTR lpCmdLine, int) {
     InitializeCriticalSection(&g_lock);
+    WriteTempScript();
 
     bool forced = false;
     if (lpCmdLine && wcsstr(lpCmdLine, L"glass")) { g_mode = 1; forced = true; }
