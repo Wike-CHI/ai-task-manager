@@ -1,0 +1,71 @@
+name: Bug 报告
+description: 崩溃、数字不对、界面异常
+labels: [bug]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        报之前先看一眼 [最新版本](https://github.com/Wike-CHI/ai-task-manager/releases/latest)，
+        很多问题已经修了。填得越具体，定位越快。
+
+  - type: input
+    id: winver
+    attributes:
+      label: Windows 版本
+      description: 运行 `winver`，把里面的版本号贴过来
+      placeholder: 例如 Windows 11 23H2 (22631.4169)
+    validations:
+      required: true
+
+  - type: dropdown
+    id: source
+    attributes:
+      label: 程序来源
+      options:
+        - Release 下载的 exe
+        - 自己编译的
+        - 不确定
+    validations:
+      required: true
+
+  - type: dropdown
+    id: theme
+    attributes:
+      label: 当前主题
+      options:
+        - 深色
+        - Vista 玻璃
+        - 跟随系统
+        - 与主题无关
+    validations:
+      required: true
+
+  - type: textarea
+    id: steps
+    attributes:
+      label: 复现步骤
+      description: 从打开程序开始，一步一步写
+      placeholder: |
+        1. 打开 AITaskManager.exe
+        2. 点「换主题」切到玻璃
+        3. 等 10 秒
+    validations:
+      required: true
+
+  - type: textarea
+    id: expected
+    attributes:
+      label: 期望 vs 实际
+      placeholder: |
+        期望：曲线区域完整显示
+        实际：底部「趋势」那行被卡片边缘裁掉
+    validations:
+      required: true
+
+  - type: textarea
+    id: extra
+    attributes:
+      label: 截图 / 补充信息
+      description: 可以直接把图片拖进来；涉及资源数字异常请附「为什么卡」的结果
+    validations:
+      required: false

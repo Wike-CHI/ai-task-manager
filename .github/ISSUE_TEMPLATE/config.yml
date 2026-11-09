@@ -1,0 +1,8 @@
+blank_issues_enabled: true
+contact_links:
+  - name: 下载最新版本
+    url: https://github.com/Wike-CHI/ai-task-manager/releases/latest
+    about: 提 bug 前先确认是不是最新版；老版本的问题可能已经修了
+  - name: 自己编译
+    url: https://github.com/Wike-CHI/ai-task-manager/blob/main/CONTRIBUTING.md
+    about: 编译步骤、代码约定、容易踩的坑都写在 CONTRIBUTING 里

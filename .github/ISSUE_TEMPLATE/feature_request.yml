@@ -1,0 +1,49 @@
+name: 功能建议
+description: 想要的新能力、更顺手的交互
+labels: [enhancement]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        先说场景，比直接给方案更容易讨论——
+        很多时候你以为要的是 A 功能，实际问题用 B 改法解决更轻。
+
+  - type: dropdown
+    id: area
+    attributes:
+      label: 涉及哪块
+      options:
+        - 指标采集（内存 / GPU / 提交 / 磁盘）
+        - 时间轴曲线
+        - 进程列表与清理
+        - 主题与外观
+        - 图标 / 打包 / CI
+        - 其它
+    validations:
+      required: true
+
+  - type: textarea
+    id: scene
+    attributes:
+      label: 什么场景下觉得缺这个
+      placeholder: |
+        我经常开着两个 IDE + 浏览器，想知道到底是哪个把内存吃满了，
+        但现在只能按名字排序，看不出一段时间内谁在增长。
+    validations:
+      required: true
+
+  - type: textarea
+    id: idea
+    attributes:
+      label: 你希望它怎么工作（可选）
+      placeholder: 比如：列表里加一列「30 秒内存增量」，正数标红
+    validations:
+      required: false
+
+  - type: textarea
+    id: alt
+    attributes:
+      label: 试过的替代方案
+      description: 比如用任务管理器 / Process Explorer 怎么绕过去的
+    validations:
+      required: false
