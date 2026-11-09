@@ -1,5 +1,12 @@
 # AI 任务管理器（C++ / Win32）
 
+[![build](https://github.com/Wike-CHI/ai-task-manager/actions/workflows/build.yml/badge.svg)](https://github.com/Wike-CHI/ai-task-manager/actions/workflows/build.yml)
+[![release](https://img.shields.io/github/v/release/Wike-CHI/ai-task-manager?display_name=tag)](https://github.com/Wike-CHI/ai-task-manager/releases)
+[![license](https://img.shields.io/github/license/Wike-CHI/ai-task-manager)](LICENSE)
+
+**[下载最新版](https://github.com/Wike-CHI/ai-task-manager/releases/latest)** —— 解压/双击即用，绿色单文件，无需 .NET 或运行库。
+
+
 原生 Win32 程序，**单个 exe，约 100 KB，无运行时依赖**。不是把任务管理器换个皮，
 而是把"看数据"换成"要结论 + 能直接动手"。
 
