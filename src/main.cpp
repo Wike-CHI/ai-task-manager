@@ -51,6 +51,13 @@ static const wchar_t* APP_TITLE = L"AI 任务管理器";
 #define ID_BTN_THEME   1012
 
 #define WM_APP_SNAPSHOT (WM_APP + 1)
+
+#define IDM_TRAY_SHOW    2001
+#define IDM_TRAY_REFRESH 2002
+#define IDM_TRAY_EXIT    2003
+#define IDM_TRAY_BALL    2101
+#define IDM_TRAY_CLEAN   2102
+#define IDM_TRAY_AUTO    2103
 #define HEADER_H   276
 #define HIST_MAX   90
 #define TIMER_ID   1
@@ -102,6 +109,9 @@ static Sample g_hist[HIST_MAX];
 static int g_histCount = 0;
 static int g_histHead = 0;
 static double g_weightsGB = 0;
+
+static HWND g_ball = nullptr;
+static bool g_ballOn = true;
 
 static void TrayAdd(HWND hwnd);
 static void TrayUpdateTip(const std::wstring& tip);
@@ -867,6 +877,8 @@ static void OnSnapshot(HWND hwnd, Snapshot* snap) {
                                  g_snap.ramUsedGB, g_snap.ramTotalGB, g_snap.ramPct,
                                  g_snap.comUsedGB, g_snap.comTotalGB, g_snap.comPct,
                                  g_snap.procCount, g_snap.cpuPct).c_str());
+    if (g_ball && IsWindowVisible(g_ball)) InvalidateRect(g_ball, nullptr, FALSE);
+
     TrayUpdateTip(Fmt(L"内存 %.0f%% · 提交 %.0f%% · 显存 %.0f%%",
                       g_snap.ramPct, g_snap.comPct,
                       g_snap.vramTotal > 0 ? g_snap.vramUsed / g_snap.vramTotal * 100 : 0));
@@ -931,14 +943,280 @@ static int LoadThemePref() {           // -1 未设置, 0 深色, 1 玻璃
     return r;
 }
 
+static void ShowFromTray(HWND hwnd);
+static void HideToTray(HWND hwnd);
+
+// ------------------------------------------------------------------ 偏好项
+static bool g_autostart = false;
+static int  g_ballX = -1, g_ballY = -1;
+
+static void RegSetStr(const wchar_t* name, const wchar_t* value) {
+    HKEY k = nullptr;
+    if (RegCreateKeyExW(HKEY_CURRENT_USER, L"Software\\AITaskManager", 0, nullptr, 0,
+                        KEY_SET_VALUE, nullptr, &k, nullptr) == ERROR_SUCCESS) {
+        RegSetValueExW(k, name, 0, REG_SZ, (const BYTE*)value,
+                       (DWORD)((wcslen(value) + 1) * sizeof(wchar_t)));
+        RegCloseKey(k);
+    }
+}
+
+static bool RegGetStr(const wchar_t* name, wchar_t* buf, DWORD chars) {
+    HKEY k = nullptr;
+    if (RegOpenKeyExW(HKEY_CURRENT_USER, L"Software\\AITaskManager", 0, KEY_QUERY_VALUE, &k)
+        != ERROR_SUCCESS) return false;
+    DWORD cb = chars * sizeof(wchar_t), type = 0;
+    bool ok = RegQueryValueExW(k, name, nullptr, &type, (LPBYTE)buf, &cb) == ERROR_SUCCESS;
+    RegCloseKey(k);
+    return ok;
+}
+
+static void RegSetDword(const wchar_t* name, DWORD v) {
+    HKEY k = nullptr;
+    if (RegCreateKeyExW(HKEY_CURRENT_USER, L"Software\\AITaskManager", 0, nullptr, 0,
+                        KEY_SET_VALUE, nullptr, &k, nullptr) == ERROR_SUCCESS) {
+        RegSetValueExW(k, name, 0, REG_DWORD, (const BYTE*)&v, sizeof(v));
+        RegCloseKey(k);
+    }
+}
+
+static DWORD RegGetDword(const wchar_t* name, DWORD def) {
+    HKEY k = nullptr;
+    DWORD v = def, cb = sizeof(v), type = 0;
+    if (RegOpenKeyExW(HKEY_CURRENT_USER, L"Software\\AITaskManager", 0, KEY_QUERY_VALUE, &k)
+        == ERROR_SUCCESS) {
+        RegQueryValueExW(k, name, nullptr, &type, (LPBYTE)&v, &cb);
+        RegCloseKey(k);
+    }
+    return v;
+}
+
+// ------------------------------------------------------------------ 开机自启
+static bool AutostartEnabled() {
+    wchar_t buf[MAX_PATH * 2]{};
+    if (!RegGetStr(L"autostart", buf, MAX_PATH * 2)) return false;
+    return buf[0] == L'1';
+}
+
+static void SetAutostart(bool on) {
+    RegSetStr(L"autostart", on ? L"1" : L"0");
+
+    // 实际生效的是 HKCU\...\Run 这一项
+    HKEY k = nullptr;
+    if (RegOpenKeyExW(HKEY_CURRENT_USER,
+                      L"Software\\Microsoft\\Windows\\CurrentVersion\\Run",
+                      0, KEY_SET_VALUE, &k) != ERROR_SUCCESS) return;
+    if (on) {
+        wchar_t exe[MAX_PATH]{};
+        GetModuleFileNameW(nullptr, exe, MAX_PATH);
+        std::wstring quoted = L"\"" + std::wstring(exe) + L"\"";
+        RegSetValueExW(k, L"AITaskManager", 0, REG_SZ, (const BYTE*)quoted.c_str(),
+                       (DWORD)((quoted.size() + 1) * sizeof(wchar_t)));
+    } else {
+        RegDeleteValueW(k, L"AITaskManager");
+    }
+    RegCloseKey(k);
+    g_autostart = on;
+}
+
+// ------------------------------------------------------------------ 清理内存
+struct CleanResult { int count = 0; double freedMB = 0; };
+
+static CleanResult CleanMemory() {
+    CleanResult r;
+    HANDLE snap = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0);
+    if (snap == INVALID_HANDLE_VALUE) return r;
+
+    PROCESSENTRY32W pe{};
+    pe.dwSize = sizeof(pe);
+    if (Process32FirstW(snap, &pe)) {
+        do {
+            if (pe.th32ProcessID <= 4) continue;
+            HANDLE h = OpenProcess(PROCESS_QUERY_INFORMATION | PROCESS_SET_QUOTA,
+                                   FALSE, pe.th32ProcessID);
+            if (!h) continue;
+
+            PROCESS_MEMORY_COUNTERS_EX before{}, after{};
+            if (GetProcessMemoryInfo(h, (PROCESS_MEMORY_COUNTERS*)&before, sizeof(before))) {
+                if (EmptyWorkingSet(h) &&
+                    GetProcessMemoryInfo(h, (PROCESS_MEMORY_COUNTERS*)&after, sizeof(after))) {
+                    double delta = (double)before.WorkingSetSize - (double)after.WorkingSetSize;
+                    if (delta > 0) {
+                        r.freedMB += delta / 1048576.0;
+                        r.count++;
+                    }
+                }
+            }
+            CloseHandle(h);
+        } while (Process32NextW(snap, &pe));
+    }
+    CloseHandle(snap);
+    return r;
+}
+
+// ------------------------------------------------------------------ 悬浮球
+#define BALL_SIZE 68
+static bool g_ballDrag = false;
+static bool g_ballMoved = false;
+static POINT g_dragOrigin{}, g_winOrigin{};
+
+static COLORREF BallColor(double pct) {
+    if (pct >= 90) return RGB(224, 85, 85);
+    if (pct >= 80) return RGB(224, 161, 58);
+    return RGB(90, 218, 143);
+}
+
+static void PaintBall(HDC dc) {
+    RECT rc{ 0, 0, BALL_SIZE, BALL_SIZE };
+    HBRUSH bg = CreateSolidBrush(RGB(18, 19, 24));
+    FillRect(dc, &rc, bg);
+    DeleteObject(bg);
+
+    double pct = g_snap.ramPct;
+    COLORREF col = BallColor(pct);
+
+    // 底圆
+    HBRUSH fill = CreateSolidBrush(RGB(34, 36, 45));
+    HPEN noPen = CreatePen(PS_NULL, 0, RGB(0, 0, 0));
+    HGDIOBJ oldBr = SelectObject(dc, fill);
+    HGDIOBJ oldPen = SelectObject(dc, noPen);
+    Ellipse(dc, 2, 2, BALL_SIZE - 2, BALL_SIZE - 2);
+
+    // 进度弧
+    HPEN arcPen = CreatePen(PS_SOLID, 5, col);
+    SelectObject(dc, arcPen);
+    SelectObject(dc, GetStockObject(NULL_BRUSH));
+    int inset = 7;
+    Arc(dc, inset, inset, BALL_SIZE - inset, BALL_SIZE - inset,
+        0, -(int)(360 * pct / 100.0), 0, -(int)(360 * pct / 100.0) - 1);
+
+    SelectObject(dc, oldBr);
+    SelectObject(dc, oldPen);
+    DeleteObject(fill);
+    DeleteObject(noPen);
+    DeleteObject(arcPen);
+
+    // 百分比
+    HFONT f = CreateFontW(17, 0, 0, 0, FW_BOLD, 0, 0, 0, DEFAULT_CHARSET,
+                          OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS, CLEARTYPE_QUALITY,
+                          DEFAULT_PITCH, L"Microsoft YaHei UI");
+    HGDIOBJ oldF = SelectObject(dc, f);
+    SetBkMode(dc, TRANSPARENT);
+    SetTextColor(dc, RGB(235, 236, 240));
+    std::wstring txt = Fmt(L"%.0f%%", pct);
+    SIZE sz{};
+    GetTextExtentPoint32W(dc, txt.c_str(), (int)txt.size(), &sz);
+    TextOutW(dc, (BALL_SIZE - sz.cx) / 2, (BALL_SIZE - sz.cy) / 2 - 2, txt.c_str(), (int)txt.size());
+    SelectObject(dc, oldF);
+    DeleteObject(f);
+}
+
+static void SaveBallPos() {
+    RECT r{};
+    if (GetWindowRect(g_ball, &r)) {
+        RegSetDword(L"ballX", (DWORD)r.left);
+        RegSetDword(L"ballY", (DWORD)r.top);
+    }
+}
+
+static LRESULT CALLBACK BallProc(HWND h, UINT m, WPARAM w, LPARAM l) {
+    switch (m) {
+    case WM_PAINT: {
+        PAINTSTRUCT ps;
+        HDC dc = BeginPaint(h, &ps);
+        PaintBall(dc);
+        EndPaint(h, &ps);
+        return 0;
+    }
+    case WM_LBUTTONDOWN:
+        SetCapture(h);
+        g_ballDrag = true;
+        g_ballMoved = false;
+        GetCursorPos(&g_dragOrigin);
+        {
+            RECT r{};
+            GetWindowRect(h, &r);
+            g_winOrigin.x = r.left;
+            g_winOrigin.y = r.top;
+        }
+        return 0;
+    case WM_MOUSEMOVE:
+        if (g_ballDrag) {
+            POINT p;
+            GetCursorPos(&p);
+            int dx = p.x - g_dragOrigin.x, dy = p.y - g_dragOrigin.y;
+            if (abs(dx) > 3 || abs(dy) > 3) g_ballMoved = true;
+            MoveWindow(h, g_winOrigin.x + dx, g_winOrigin.y + dy, BALL_SIZE, BALL_SIZE, TRUE);
+        }
+        return 0;
+    case WM_LBUTTONUP:
+        ReleaseCapture();
+        g_ballDrag = false;
+        if (g_ballMoved) {
+            SaveBallPos();
+        } else {
+            HWND main = GetParent(h);
+            if (main) ShowFromTray(main);
+        }
+        return 0;
+    case WM_RBUTTONUP: {
+        POINT pt;
+        GetCursorPos(&pt);
+        HMENU menu = CreatePopupMenu();
+        AppendMenuW(menu, MF_STRING, IDM_TRAY_SHOW, L"打开主窗口");
+        AppendMenuW(menu, MF_STRING, 2101, L"隐藏悬浮球");
+        AppendMenuW(menu, MF_STRING, IDM_TRAY_EXIT, L"退出");
+        SetForegroundWindow(h);
+        int cmd = (int)TrackPopupMenu(menu, TPM_RETURNCMD | TPM_RIGHTBUTTON,
+                                      pt.x, pt.y, 0, h, nullptr);
+        DestroyMenu(menu);
+        HWND main = GetParent(h);
+        if (cmd == IDM_TRAY_SHOW && main) ShowFromTray(main);
+        else if (cmd == 2101) ShowWindow(h, SW_HIDE), g_ballOn = false, RegSetStr(L"ball", L"0");
+        else if (cmd == IDM_TRAY_EXIT && main) DestroyWindow(main);
+        return 0;
+    }
+    }
+    return DefWindowProcW(h, m, w, l);
+}
+
+static void CreateBall(HWND owner) {
+    if (g_ball) { ShowWindow(g_ball, SW_SHOW); return; }
+
+    static bool registered = false;
+    if (!registered) {
+        WNDCLASSEXW wc{};
+        wc.cbSize = sizeof(wc);
+        wc.lpfnWndProc = BallProc;
+        wc.hInstance = GetModuleHandleW(nullptr);
+        wc.hCursor = LoadCursorW(nullptr, IDC_HAND);
+        wc.lpszClassName = L"AITaskBallWnd";
+        RegisterClassExW(&wc);
+        registered = true;
+    }
+
+    int x = g_ballX >= 0 ? g_ballX : (GetSystemMetrics(SM_CXSCREEN) - BALL_SIZE - 40);
+    int y = g_ballY >= 0 ? g_ballY : (GetSystemMetrics(SM_CYSCREEN) / 3);
+    g_ball = CreateWindowExW(WS_EX_TOPMOST | WS_EX_TOOLWINDOW | WS_EX_LAYERED,
+                             L"AITaskBallWnd", L"", WS_POPUP,
+                             x, y, BALL_SIZE, BALL_SIZE, owner, nullptr,
+                             GetModuleHandleW(nullptr), nullptr);
+    if (!g_ball) return;
+
+    // 圆形 + 轻微透明
+    HRGN rgn = CreateEllipticRgn(0, 0, BALL_SIZE, BALL_SIZE);
+    SetWindowRgn(g_ball, rgn, TRUE);
+    SetLayeredWindowAttributes(g_ball, 0, 235, LWA_ALPHA);
+    ShowWindow(g_ball, SW_SHOW);
+}
+
+static void DestroyBall() {
+    if (g_ball) { DestroyWindow(g_ball); g_ball = nullptr; }
+}
+
 // ------------------------------------------------------------------ 托盘
 static NOTIFYICONDATAW g_nid{};
 static bool g_trayAdded = false;
 static bool g_hiddenToTray = false;
-
-#define IDM_TRAY_SHOW  2001
-#define IDM_TRAY_REFRESH 2002
-#define IDM_TRAY_EXIT  2003
 
 static HICON TrayIconForTheme(HINSTANCE inst) {
     int id = g_theme.glass ? 2 : 1;
@@ -1010,6 +1288,10 @@ static void TrayMenu(HWND hwnd) {
     AppendMenuW(menu, MF_STRING, IDM_TRAY_SHOW, g_hiddenToTray ? L"显示窗口" : L"隐藏窗口");
     AppendMenuW(menu, MF_STRING, IDM_TRAY_REFRESH, L"立即刷新");
     AppendMenuW(menu, MF_SEPARATOR, 0, nullptr);
+    AppendMenuW(menu, MF_STRING | (g_ballOn ? MF_CHECKED : 0), IDM_TRAY_BALL, L"内存悬浮球");
+    AppendMenuW(menu, MF_STRING, IDM_TRAY_CLEAN, L"清理内存");
+    AppendMenuW(menu, MF_STRING | (AutostartEnabled() ? MF_CHECKED : 0), IDM_TRAY_AUTO, L"开机自启");
+    AppendMenuW(menu, MF_SEPARATOR, 0, nullptr);
     AppendMenuW(menu, MF_STRING, IDM_TRAY_EXIT, L"退出");
 
     SetForegroundWindow(hwnd);          // 不先设前台，菜单点外面不会消失
@@ -1024,6 +1306,11 @@ static void TrayMenu(HWND hwnd) {
         break;
     case IDM_TRAY_REFRESH:
         RefreshAsync(hwnd);
+        break;
+    case IDM_TRAY_BALL:
+    case IDM_TRAY_CLEAN:
+    case IDM_TRAY_AUTO:
+        PostMessageW(hwnd, WM_COMMAND, MAKEWPARAM(cmd, 0), 0);
         break;
     case IDM_TRAY_EXIT:
         DestroyWindow(hwnd);
@@ -1126,11 +1413,29 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
 
         TrayAdd(hwnd);
         if (!g_trayAdded) AppendChat(L"托盘图标添加失败（Shell_NotifyIcon 返回失败）。");
+
+        g_ballOn = !(RegGetStr(L"ball", nullptr, 0));   // 默认开
+        wchar_t pref[8]{};
+        if (RegGetStr(L"ball", pref, 8)) g_ballOn = (pref[0] != L'0');
+        g_ballX = (int)RegGetDword(L"ballX", 0xFFFFFFFF);
+        g_ballY = (int)RegGetDword(L"ballY", 0xFFFFFFFF);
+        if (g_ballOn) CreateBall(hwnd);
         return 0;
     }
     case WM_APP_SNAPSHOT:
         if (lp) OnSnapshot(hwnd, (Snapshot*)lp);   // 防御：外部误投递会被丢弃
         return 0;
+
+    case WM_APP_SNAPSHOT + 2: {                    // 清理内存结果
+        auto* r = (CleanResult*)lp;
+        if (r) {
+            AppendChat(Fmt(L"整理完成：%d 个进程，工作集减少 %.1f GB（转入备用内存，可立即复用）。",
+                           r->count, r->freedMB / 1024.0));
+            delete r;
+            RefreshAsync(hwnd);
+        }
+        return 0;
+    }
 
     case WM_APP_SNAPSHOT + 1:               // 托盘回调
         if (LOWORD(lp) == WM_LBUTTONUP || LOWORD(lp) == WM_LBUTTONDBLCLK) {
@@ -1255,6 +1560,24 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
             AppendChat(Fmt(L"已切到「%s」%s", ModeName(g_mode),
                            g_mode == 2 ? (g_theme.glass ? L"（系统当前是浅色）" : L"（系统当前是深色）")
                                        : L""));
+        } else if (id == IDM_TRAY_BALL) {
+            g_ballOn = !g_ballOn;
+            RegSetStr(L"ball", g_ballOn ? L"1" : L"0");
+            if (g_ballOn) CreateBall(hwnd);
+            else ShowWindow(g_ball, SW_HIDE);
+            AppendChat(g_ballOn ? L"悬浮球已显示，可拖动，点一下打开窗口。"
+                                : L"悬浮球已隐藏（托盘菜单可再开）。");
+        } else if (id == IDM_TRAY_CLEAN) {
+            AppendChat(L"正在整理内存…");
+            std::thread([hwnd]() {
+                CleanResult r = CleanMemory();
+                auto* payload = new CleanResult(r);
+                PostMessageW(hwnd, WM_APP_SNAPSHOT + 2, 0, (LPARAM)payload);
+            }).detach();
+        } else if (id == IDM_TRAY_AUTO) {
+            bool on = !AutostartEnabled();
+            SetAutostart(on);
+            AppendChat(on ? L"已设为开机自启（登录后自动进托盘）。" : L"已取消开机自启。");
         } else if (id == ID_BTN_COPY) {
             std::wstring s = AnalyzeWhy(g_snap);
             if (OpenClipboard(hwnd)) {
@@ -1334,6 +1657,7 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
         return 0;
     case WM_DESTROY:
         TrayRemove();
+        DestroyBall();
         KillTimer(hwnd, TIMER_ID);
         PostQuitMessage(0);
         return 0;
