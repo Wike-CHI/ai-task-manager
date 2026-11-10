@@ -1640,7 +1640,6 @@ static double g_ballHover = 0, g_ballHoverT = 0;
 static double g_ballPress = 0, g_ballPressT = 0;
 static double g_ballSpin = 0;
 static bool   g_ballCleaning = false;
-static DWORD  g_ballLastClick = 0;
 
 static inline Gdiplus::REAL SR(int v) { return (Gdiplus::REAL)S(v); }
 
@@ -1914,17 +1913,9 @@ static LRESULT CALLBACK BallProc(HWND h, UINT m, WPARAM w, LPARAM l) {
 
         if (g_ballMoved) { SaveBallPos(); return 0; }
 
-        // 单击清理，双击打开窗口：用 260ms 的延迟把两者分开
-        DWORD now = GetTickCount();
-        if (g_ballLastClick && now - g_ballLastClick <= (DWORD)GetDoubleClickTime()) {
-            KillTimer(h, BALL_TMR_CLICK);
-            g_ballLastClick = 0;
-            HWND main = GetParent(h);
-            if (main) ShowFromTray(main);
-        } else {
-            g_ballLastClick = now;
-            SetTimer(h, BALL_TMR_CLICK, 260, nullptr);
-        }
+        // 单击就清理，不弹主窗口（开窗走右键菜单或托盘）。
+        // 连点只是把定时器重置，不会连着清两次。
+        SetTimer(h, BALL_TMR_CLICK, 260, nullptr);
         return 0;
     }
 
@@ -1999,7 +1990,7 @@ static void CreateBall(HWND owner) {
         ti.uFlags = TTF_SUBCLASS | TTF_IDISHWND;
         ti.hwnd = g_ball;
         ti.uId = (UINT_PTR)g_ball;
-        static wchar_t tipText[] = L"单击：清理内存\n双击：打开主窗口\n右键：更多";
+        static wchar_t tipText[] = L"单击：清理内存\n右键：打开主窗口 / 更多";
         ti.lpszText = tipText;
         SendMessageW(g_ballTip, TTM_ADDTOOLW, 0, (LPARAM)&ti);
         SendMessageW(g_ballTip, TTM_SETDELAYTIME, TTDT_INITIAL, MAKELPARAM(600, 0));
@@ -2633,7 +2624,7 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
             RegSetStr(L"ball", g_ballOn ? L"1" : L"0");
             if (g_ballOn) CreateBall(hwnd);
             else ShowWindow(g_ball, SW_HIDE);
-            AppendChat(g_ballOn ? L"悬浮球已显示：单击清理内存，双击打开窗口，右键有菜单。"
+            AppendChat(g_ballOn ? L"悬浮球已显示：单击清理内存，右键有菜单（打开窗口 / 隐藏 / 退出）。"
                                 : L"悬浮球已隐藏（托盘菜单可再开）。");
         } else if (id == IDM_TRAY_CLEAN) {
             AppendChat(L"正在整理内存…");
