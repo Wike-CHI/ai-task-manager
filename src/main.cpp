@@ -170,7 +170,11 @@ static void RunHidden(const std::wstring& cmd, std::wstring& out) {
     SECURITY_ATTRIBUTES sa{ sizeof(sa), nullptr, TRUE };
     wchar_t tmp[MAX_PATH];
     GetTempPathW(MAX_PATH, tmp);
-    std::wstring path = std::wstring(tmp) + L"aitm_gpu.txt";
+    // 每次调用独立文件：GPU 查询和温度脚本是两个线程，共用一个文件会互相删掉输出
+    static std::atomic<unsigned> seq{ 0 };
+    std::wstring path = std::wstring(tmp) + L"aitm_" +
+                        std::to_wstring(GetCurrentProcessId()) + L"_" +
+                        std::to_wstring(seq.fetch_add(1)) + L".txt";
     DeleteFileW(path.c_str());
 
     HANDLE h = CreateFileW(path.c_str(), GENERIC_WRITE, FILE_SHARE_READ, &sa,
@@ -892,7 +896,7 @@ static void PaintChart(HDC dc, int x, int y, int w, int h) {
             int idx = (g_histHead - g_histCount + i + HIST_MAX * 2) % HIST_MAX;
             const Sample& sm = g_hist[idx];
             double v = which == 0 ? sm.ram : (which == 1 ? sm.com : sm.vram);
-            int px = plotX + (int)(i * step);
+            int px = plotX + plotW - (int)((g_histCount - 1 - i) * step);
             int py = toY(v);
             if (first) { MoveToEx(dc, px, py, nullptr); first = false; }
             else LineTo(dc, px, py);
@@ -907,10 +911,147 @@ static void PaintChart(HDC dc, int x, int y, int w, int h) {
     drawLine(C_AMBER, 1, comNow);
     drawLine(C_GREEN, 0, ramNow);
 
-    int lx = x + w - 300;
+    int lx = x + w - 288;
     TextAt(dc, lx, y + 2, C_GREEN, Fmt(L"● 内存 %.0f%%", ramNow));
-    TextAt(dc, lx + 106, y + 2, C_AMBER, Fmt(L"● 提交 %.0f%%", comNow));
-    TextAt(dc, lx + 214, y + 2, C_BLUE, Fmt(L"● 显存 %.0f%%", gpuNow));
+    TextAt(dc, lx + 94, y + 2, C_AMBER, Fmt(L"● 提交 %.0f%%", comNow));
+    TextAt(dc, lx + 188, y + 2, C_BLUE, Fmt(L"● 显存 %.0f%%", gpuNow));
+}
+
+// 风扇转速相对温度的滞后（秒）：在 0~30 秒里找相关系数最高的位移
+// -1 样本不够；-2 两者无关（温度或转速基本不动）
+static double FanLagSeconds() {
+    if (g_histCount < 24 || g_temps.gpu <= 0) return -1;
+    const int n = std::min(g_histCount, 60);
+    auto fAt = [](int back) { return g_hist[(g_histHead - 1 - back + HIST_MAX * 2) % HIST_MAX].fan; };
+    auto tAt = [](int back) { return g_hist[(g_histHead - 1 - back + HIST_MAX * 2) % HIST_MAX].gpuT; };
+
+    auto corr = [&](int lag, double& r) {
+        int m = n - lag;
+        if (m < 15) return false;
+        double sa = 0, sb = 0, saa = 0, sbb = 0, sab = 0;
+        for (int i = 0; i < m; ++i) {
+            double a = tAt(i + lag), b = fAt(i);       // 更早的温度 对 更晚的转速
+            sa += a; sb += b; saa += a * a; sbb += b * b; sab += a * b;
+        }
+        double va = saa - sa * sa / m, vb = sbb - sb * sb / m;
+        if (va <= 1e-6 || vb <= 1e-6) return false;
+        r = (sab - sa * sb / m) / std::sqrt(va * vb);
+        return true;
+    };
+
+    double bestR = -2;
+    int bestLag = 0;
+    for (int lag = 0; lag <= 15; ++lag) {
+        double r;
+        if (corr(lag, r) && r > bestR) { bestR = r; bestLag = lag; }
+    }
+    if (bestR < 0.35) return -2;
+    return bestLag * 2.0;
+}
+
+// 散热曲线：左轴=风扇转速(%)，右轴=GPU 温度(°C)，同一时间轴才看得出谁先动
+static void PaintCoolChart(HDC dc, int x, int y, int w, int h) {
+    if (g_theme.glass) FillAlpha(dc, x, y, w, h, RGB(255, 255, 255), 110);
+    SetBkMode(dc, TRANSPARENT);
+
+    const int leftW = 42, rightW = 40;
+    const int plotX = x + leftW, plotW = w - leftW - rightW;
+    const int plotY = y + 18, plotH = h - 18 - 6;
+
+    if (g_histCount < 2) {
+        TextAt(dc, x + 70, y + h / 2 - 8, C_DIM, L"采样中…");
+        return;
+    }
+    if (g_temps.gpu <= 0) {
+        TextAt(dc, x + 70, y + h / 2 - 8, C_DIM, L"没有 GPU 温度，画不了散热曲线");
+        return;
+    }
+
+    double fmin = 100, fmax = 0, tmin = 200, tmax = 0;
+    for (int i = 0; i < g_histCount; ++i) {
+        int idx = (g_histHead - g_histCount + i + HIST_MAX * 2) % HIST_MAX;
+        const Sample& sm = g_hist[idx];
+        if (sm.fan <= 0 && sm.gpuT <= 0) continue;
+        fmin = std::min(fmin, sm.fan); fmax = std::max(fmax, sm.fan);
+        tmin = std::min(tmin, sm.gpuT); tmax = std::max(tmax, sm.gpuT);
+    }
+    if (fmax <= 0 && tmax <= 0) {
+        TextAt(dc, x + 70, y + h / 2 - 8, C_DIM, L"还没有读到转速/温度");
+        return;
+    }
+
+    auto pad = [](double& lo, double& hi, double minSpan, double absLo, double absHi) {
+        if (hi < lo) std::swap(hi, lo);
+        if (hi - lo < minSpan) {
+            double mid = (hi + lo) / 2;
+            lo = mid - minSpan / 2; hi = mid + minSpan / 2;
+        }
+        double span = hi - lo;
+        lo = std::max(absLo, lo - span * 0.15);
+        hi = std::min(absHi, hi + span * 0.15);
+        if (hi - lo < 1) hi = lo + 1;
+    };
+    pad(fmin, fmax, 10, 0, 100);
+    pad(tmin, tmax, 6, 0, 120);
+
+    auto yFan = [&](double v) {
+        v = std::max(fmin, std::min(fmax, v));
+        return plotY + plotH - 2 - (int)((v - fmin) / (fmax - fmin) * (plotH - 6));
+    };
+    auto yTemp = [&](double v) {
+        v = std::max(tmin, std::min(tmax, v));
+        return plotY + plotH - 2 - (int)((v - tmin) / (tmax - tmin) * (plotH - 6));
+    };
+
+    HPEN grid = CreatePen(PS_DOT, 1, C_GRID);
+    HPEN oldPen = (HPEN)SelectObject(dc, grid);
+    for (int i = 0; i <= 4; ++i) {
+        int gy = plotY + (plotH - 6) * i / 4;
+        MoveToEx(dc, plotX, gy, nullptr);
+        LineTo(dc, plotX + plotW, gy);
+        double fv = fmax - (fmax - fmin) * i / 4;
+        double tv = tmax - (tmax - tmin) * i / 4;
+        if (i > 0) {
+            TextAt(dc, x + 2, gy - 7, C_DIM, Fmt(L"%.0f%%", fv));
+            TextAt(dc, plotX + plotW + 6, gy - 7, C_DIM, Fmt(L"%.0f°C", tv));
+        }
+    }
+    SelectObject(dc, oldPen);
+    DeleteObject(grid);
+
+    double step = (double)plotW / (HIST_MAX - 1);
+    auto drawLine = [&](COLORREF color, bool isFan, double& lastV) {
+        HPEN pen = CreatePen(PS_SOLID, 2, color);
+        HPEN op = (HPEN)SelectObject(dc, pen);
+        bool first = true;
+        for (int i = 0; i < g_histCount; ++i) {
+            int idx = (g_histHead - g_histCount + i + HIST_MAX * 2) % HIST_MAX;
+            const Sample& sm = g_hist[idx];
+            double v = isFan ? sm.fan : sm.gpuT;
+            if (v <= 0) { first = true; continue; }          // 断点不连线
+            int px = plotX + plotW - (int)((g_histCount - 1 - i) * step);
+            int py = isFan ? yFan(v) : yTemp(v);
+            if (first) { MoveToEx(dc, px, py, nullptr); first = false; }
+            else LineTo(dc, px, py);
+            lastV = v;
+        }
+        SelectObject(dc, op);
+        DeleteObject(pen);
+    };
+
+    double fanNow = 0, tempNow = 0;
+    drawLine(C_BLUE, true, fanNow);
+    drawLine(C_RED, false, tempNow);
+
+    TextAt(dc, x + 6, y + 1, C_BLUE, Fmt(L"● 转速 %.0f%%", fanNow));
+    TextAt(dc, x + 112, y + 1, C_RED, Fmt(L"● 温度 %.0f°C", tempNow));
+
+    double lag = FanLagSeconds();
+    if (lag >= 0)
+        TextAt(dc, x + w - 96, y + 1, lag < 2 ? C_MUTED : C_AMBER,
+               lag < 2 ? L"两者同步" : Fmt(L"滞后 %.0f 秒", lag));
+    else if (lag == -2)
+        TextAt(dc, x + w - 96, y + 1, C_DIM, L"暂无可比");
 }
 
 static void PaintCooling(HDC dc, int x, int y, int w) {
@@ -1012,7 +1153,10 @@ static void PaintHeader(HDC dc, int w, int h) {
     else
         TextAt(dc, 532, 112, C_DIM, Fmt(L"未运行（权重 %.1f GB）", g_weightsGB));
 
-    PaintChart(dc, 24, 136, w - 48, 90);
+    const int gap = 14;
+    const int halfW = (w - 48 - gap) / 2;
+    PaintChart(dc, 24, 136, halfW, 90);
+    PaintCoolChart(dc, 24 + halfW + gap, 136, halfW, 90);
 
     TextAt(dc, 28, 232, C_DIM, Fmt(L"最近 %.0f 秒", g_histCount * 2.0));
     TextAt(dc, w - 60, 232, C_DIM, L"现在");
