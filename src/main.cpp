@@ -13,6 +13,8 @@
 #include <tlhelp32.h>
 #include <shellapi.h>
 #include <dwmapi.h>
+#include <objidl.h>      // WIN32_LEAN_AND_MEAN 把 IUnknown 剪掉了，GDI+ 需要它
+#include <gdiplus.h>
 #include <string>
 #include <vector>
 #include <map>
@@ -33,6 +35,7 @@
 #pragma comment(lib, "gdi32.lib")
 #pragma comment(lib, "msimg32.lib")
 #pragma comment(lib, "dwmapi.lib")
+#pragma comment(lib, "gdiplus.lib")
 #pragma comment(lib, "advapi32.lib")
 #pragma comment(linker, "/SUBSYSTEM:WINDOWS /ENTRY:wWinMainCRTStartup")
 
@@ -129,6 +132,7 @@ static double g_weightsGB = 0;
 
 static HWND g_ball = nullptr;
 static bool g_ballOn = true;
+static void BallKick();          // 定义在悬浮球那一段，快照回调要提前用
 
 static void TrayAdd(HWND hwnd);
 static void TrayUpdateTip(const std::wstring& tip);
@@ -1223,7 +1227,7 @@ static void OnSnapshot(HWND hwnd, Snapshot* snap) {
         if (g_temps.cpu > 0) t += Fmt(L"   ACPI %.0f°C", g_temps.cpu);
         SetWindowTextW(g_status, t.c_str());
     }
-    if (g_ball && IsWindowVisible(g_ball)) InvalidateRect(g_ball, nullptr, FALSE);
+    if (g_ball && IsWindowVisible(g_ball)) BallKick();
 
     TrayUpdateTip(Fmt(L"内存 %.0f%% · 提交 %.0f%% · 显存 %.0f%%",
                       g_snap.ramPct, g_snap.comPct,
@@ -1400,60 +1404,171 @@ static CleanResult CleanMemory() {
 }
 
 // ------------------------------------------------------------------ 悬浮球
-#define BALL_SIZE S(68)
+#define BALL_W        S(88)                 // 窗口（球 + 阴影留白）
+#define BALL_D        S(64)                 // 球本体直径
+#define BALL_TMR_FRAME 11
+#define BALL_TMR_CLICK 12
+#define BALL_MSG_CLEAN (WM_APP + 3)
+
 static bool g_ballDrag = false;
 static bool g_ballMoved = false;
 static POINT g_dragOrigin{}, g_winOrigin{};
 
-static COLORREF BallColor(double pct) {
-    if (pct >= 90) return RGB(224, 85, 85);
-    if (pct >= 80) return RGB(224, 161, 58);
-    return RGB(90, 218, 143);
+static bool   g_ballHovering = false;
+static double g_ballPct = 0;                // 显示值，平滑逼近真实值
+static double g_ballHover = 0, g_ballHoverT = 0;
+static double g_ballPress = 0, g_ballPressT = 0;
+static double g_ballSpin = 0;
+static bool   g_ballCleaning = false;
+static std::wstring g_ballToast;
+static DWORD  g_ballToastUntil = 0;
+static DWORD  g_ballLastClick = 0;
+
+static inline Gdiplus::REAL SR(int v) { return (Gdiplus::REAL)S(v); }
+
+static HWND    g_ballTip = nullptr;
+static HBITMAP g_ballDib = nullptr;
+static HDC     g_ballMemDC = nullptr;
+static void*   g_ballBits = nullptr;
+
+static Gdiplus::Color BallRingColor(double pct) {
+    if (pct >= 90) return Gdiplus::Color(255, 240, 92, 92);
+    if (pct >= 80) return Gdiplus::Color(255, 240, 168, 60);
+    return Gdiplus::Color(255, 66, 208, 142);
 }
 
-static void PaintBall(HDC dc) {
-    RECT rc{ 0, 0, BALL_SIZE, BALL_SIZE };
-    HBRUSH bg = CreateSolidBrush(RGB(18, 19, 24));
-    FillRect(dc, &rc, bg);
-    DeleteObject(bg);
+static void BallKick() {
+    if (g_ball) SetTimer(g_ball, BALL_TMR_FRAME, 33, nullptr);
+}
 
-    double pct = g_snap.ramPct;
-    COLORREF col = BallColor(pct);
+static void RenderBall() {
+    HWND h = g_ball;
+    if (!h) return;
 
-    // 底圆
-    HBRUSH fill = CreateSolidBrush(RGB(34, 36, 45));
-    HPEN noPen = CreatePen(PS_NULL, 0, RGB(0, 0, 0));
-    HGDIOBJ oldBr = SelectObject(dc, fill);
-    HGDIOBJ oldPen = SelectObject(dc, noPen);
-    Ellipse(dc, S(2), S(2), BALL_SIZE - S(2), BALL_SIZE - S(2));
+    const int size = BALL_W;
+    if (!g_ballDib) {
+        HDC screen = GetDC(nullptr);
+        BITMAPINFO bi{};
+        bi.bmiHeader.biSize = sizeof(BITMAPINFOHEADER);
+        bi.bmiHeader.biWidth = size;
+        bi.bmiHeader.biHeight = -size;
+        bi.bmiHeader.biPlanes = 1;
+        bi.bmiHeader.biBitCount = 32;
+        bi.bmiHeader.biCompression = BI_RGB;
+        g_ballDib = CreateDIBSection(screen, &bi, DIB_RGB_COLORS, &g_ballBits, nullptr, 0);
+        g_ballMemDC = CreateCompatibleDC(screen);
+        ReleaseDC(nullptr, screen);
+        if (!g_ballDib || !g_ballMemDC) return;
+    }
+    memset(g_ballBits, 0, (size_t)size * size * 4);
 
-    // 进度弧
-    HPEN arcPen = CreatePen(PS_SOLID, S(5), col);
-    SelectObject(dc, arcPen);
-    SelectObject(dc, GetStockObject(NULL_BRUSH));
-    int inset = S(7);
-    Arc(dc, inset, inset, BALL_SIZE - inset, BALL_SIZE - inset,
-        0, -(int)(360 * pct / 100.0), 0, -(int)(360 * pct / 100.0) - 1);
+    const Gdiplus::REAL cx = size / 2.0f, cy = size / 2.0f;
+    const Gdiplus::REAL scale = 1.0f + 0.06f * (Gdiplus::REAL)g_ballHover
+                                      - 0.05f * (Gdiplus::REAL)g_ballPress;
+    const Gdiplus::REAL R = (BALL_D / 2.0f - S(3)) * scale;
+    const Gdiplus::REAL ringW = S(5) * (1.0f + 0.12f * (Gdiplus::REAL)g_ballHover);
+    const Gdiplus::REAL ringR = R - ringW / 2 - S(1);
 
-    SelectObject(dc, oldBr);
-    SelectObject(dc, oldPen);
-    DeleteObject(fill);
-    DeleteObject(noPen);
-    DeleteObject(arcPen);
+    {
+        Gdiplus::Bitmap bmp(size, size, size * 4, PixelFormat32bppPARGB, (BYTE*)g_ballBits);
+        Gdiplus::Graphics g(&bmp);
+        g.SetSmoothingMode(Gdiplus::SmoothingModeAntiAlias);
+        g.SetPixelOffsetMode(Gdiplus::PixelOffsetModeHighQuality);
+        g.SetTextRenderingHint(Gdiplus::TextRenderingHintAntiAliasGridFit);
 
-    // 百分比
-    HFONT f = CreateFontW(S(17), 0, 0, 0, FW_BOLD, 0, 0, 0, DEFAULT_CHARSET,
-                          OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS, CLEARTYPE_QUALITY,
-                          DEFAULT_PITCH, L"Microsoft YaHei UI");
-    HGDIOBJ oldF = SelectObject(dc, f);
-    SetBkMode(dc, TRANSPARENT);
-    SetTextColor(dc, RGB(235, 236, 240));
-    std::wstring txt = Fmt(L"%.0f%%", pct);
-    SIZE sz{};
-    GetTextExtentPoint32W(dc, txt.c_str(), (int)txt.size(), &sz);
-    TextOutW(dc, (BALL_SIZE - sz.cx) / 2, (BALL_SIZE - sz.cy) / 2 - 2, txt.c_str(), (int)txt.size());
-    SelectObject(dc, oldF);
-    DeleteObject(f);
+        // 柔和投影：中心浓、边缘透明，比一圈圈描边干净
+        {
+            Gdiplus::GraphicsPath path;
+            path.AddEllipse(cx - R - S(5), cy - R - S(3), (R + S(5)) * 2, (R + S(5)) * 2);
+            Gdiplus::PathGradientBrush sbr(&path);
+            sbr.SetCenterColor(Gdiplus::Color(96, 0, 0, 0));
+            Gdiplus::Color edge[1] = { Gdiplus::Color(0, 0, 0, 0) };
+            int n = 1;
+            sbr.SetSurroundColors(edge, &n);
+            g.FillPath(&sbr, &path);
+        }
+
+        // 球体：上浅下深，像一颗压下去的玻璃珠
+        {
+            Gdiplus::LinearGradientBrush body(Gdiplus::PointF(cx, cy - R), Gdiplus::PointF(cx, cy + R),
+                                              Gdiplus::Color(255, 46, 50, 66),
+                                              Gdiplus::Color(255, 17, 19, 26));
+            g.FillEllipse(&body, cx - R, cy - R, R * 2, R * 2);
+        }
+
+        // 轨道
+        {
+            Gdiplus::Pen track(Gdiplus::Color(255, 56, 60, 76), ringW);
+            g.DrawEllipse(&track, cx - ringR, cy - ringR, ringR * 2, ringR * 2);
+        }
+
+        // 进度 / 清理中转圈
+        Gdiplus::Color ringCol = BallRingColor(g_ballPct);
+        if (g_ballCleaning) ringCol = Gdiplus::Color(255, 120, 205, 255);
+
+        Gdiplus::Pen arc(ringCol, ringW);
+        arc.SetStartCap(Gdiplus::LineCapRound);
+        arc.SetEndCap(Gdiplus::LineCapRound);
+
+        if (g_ballCleaning) {
+            g.DrawArc(&arc, cx - ringR, cy - ringR, ringR * 2, ringR * 2,
+                      (Gdiplus::REAL)(g_ballSpin - 90), 100.0f);
+        } else {
+            double sweep = std::max(1.0, std::min(360.0, g_ballPct * 3.6));
+            g.DrawArc(&arc, cx - ringR, cy - ringR, ringR * 2, ringR * 2, -90.0f, (Gdiplus::REAL)sweep);
+        }
+
+        // 悬停时外面套一圈淡淡的光
+        if (g_ballHover > 0.02) {
+            Gdiplus::Pen glow(Gdiplus::Color((BYTE)(70 * g_ballHover), ringCol.GetR(),
+                                             ringCol.GetG(), ringCol.GetB()), SR(1));
+            Gdiplus::REAL gr = R + SR(2);
+            g.DrawEllipse(&glow, cx - gr, cy - gr, gr * 2, gr * 2);
+        }
+
+        Gdiplus::StringFormat sf;
+        sf.SetAlignment(Gdiplus::StringAlignmentCenter);
+        sf.SetLineAlignment(Gdiplus::StringAlignmentCenter);
+
+        Gdiplus::FontFamily fam(L"Microsoft YaHei UI");
+
+        // 百分比
+        {
+            Gdiplus::Font f(&fam, (Gdiplus::REAL)S(18), Gdiplus::FontStyleBold, Gdiplus::UnitPixel);
+            Gdiplus::SolidBrush br(Gdiplus::Color(255, 237, 241, 248));
+            Gdiplus::RectF tr(cx - R, cy - SR(19), R * 2, SR(24));
+            std::wstring txt = Fmt(L"%.0f%%", g_ballPct);
+            g.DrawString(txt.c_str(), -1, &f, tr, &sf, &br);
+        }
+
+        // 下方一行说明：这球是干嘛的、现在能干嘛
+        {
+            std::wstring label = L"内存";
+            Gdiplus::Color lc(255, 136, 146, 170);
+            if (g_ballCleaning)                      { label = L"清理中"; lc = Gdiplus::Color(255, 120, 205, 255); }
+            else if (g_ballToastUntil > GetTickCount()) { label = g_ballToast; lc = Gdiplus::Color(255, 110, 231, 183); }
+            else if (g_ballHover > 0.5)              { label = L"点击清理"; lc = Gdiplus::Color(255, 127, 212, 255); }
+
+            Gdiplus::Font f(&fam, (Gdiplus::REAL)S(9), Gdiplus::FontStyleRegular, Gdiplus::UnitPixel);
+            Gdiplus::SolidBrush br(lc);
+            Gdiplus::RectF tr(cx - R, cy + SR(4), R * 2, SR(14));
+            g.DrawString(label.c_str(), -1, &f, tr, &sf, &br);
+        }
+    }
+
+    HGDIOBJ oldBmp = SelectObject(g_ballMemDC, g_ballDib);
+
+    RECT wr{};
+    GetWindowRect(h, &wr);
+    POINT dst{ wr.left, wr.top };
+    SIZE sz{ size, size };
+    POINT src{ 0, 0 };
+    BLENDFUNCTION bf{ AC_SRC_OVER, 0, 255, AC_SRC_ALPHA };
+    HDC screen = GetDC(nullptr);
+    UpdateLayeredWindow(h, screen, &dst, &sz, g_ballMemDC, &src, 0, &bf, ULW_ALPHA);
+    ReleaseDC(nullptr, screen);
+
+    SelectObject(g_ballMemDC, oldBmp);
 }
 
 static void SaveBallPos() {
@@ -1464,19 +1579,85 @@ static void SaveBallPos() {
     }
 }
 
+static void BallStartClean(HWND h) {
+    if (g_ballCleaning) return;
+    g_ballCleaning = true;
+    g_ballSpin = 0;
+    g_ballToast.clear();
+    BallKick();
+    std::thread([h]() {
+        CleanResult r = CleanMemory();
+        PostMessageW(h, BALL_MSG_CLEAN, 0, (LPARAM)new CleanResult(r));
+    }).detach();
+}
+
+// 每帧推进动画；全部稳定了就停表，空转不占 CPU
+static bool BallTick(HWND h) {
+    bool changed = false;
+
+    if (std::fabs(g_snap.ramPct - g_ballPct) > 0.15) {
+        g_ballPct += (g_snap.ramPct - g_ballPct) * 0.16;
+        changed = true;
+    } else if (g_ballPct != g_snap.ramPct) {
+        g_ballPct = g_snap.ramPct;
+        changed = true;
+    }
+
+    auto ease = [&](double& v, double target, double k) {
+        if (std::fabs(v - target) > 0.01) { v += (target - v) * k; return true; }
+        if (v != target) { v = target; return true; }
+        return false;
+    };
+    changed |= ease(g_ballHover, g_ballHoverT, 0.30);
+    changed |= ease(g_ballPress, g_ballPressT, 0.35);
+
+    if (g_ballCleaning) {
+        g_ballSpin += 9.0;
+        if (g_ballSpin >= 360) g_ballSpin -= 360;
+        changed = true;
+    }
+    if (!g_ballToast.empty() && GetTickCount() > g_ballToastUntil) {
+        g_ballToast.clear();
+        changed = true;
+    }
+
+    if (changed) RenderBall();
+    return changed;
+}
+
 static LRESULT CALLBACK BallProc(HWND h, UINT m, WPARAM w, LPARAM l) {
     switch (m) {
-    case WM_PAINT: {
-        PAINTSTRUCT ps;
-        HDC dc = BeginPaint(h, &ps);
-        PaintBall(dc);
-        EndPaint(h, &ps);
+    case WM_TIMER:
+        if (w == BALL_TMR_FRAME) {
+            if (!BallTick(h)) KillTimer(h, BALL_TMR_FRAME);
+        } else if (w == BALL_TMR_CLICK) {
+            KillTimer(h, BALL_TMR_CLICK);
+            BallStartClean(h);
+        }
+        return 0;
+
+    case BALL_MSG_CLEAN: {
+        auto* r = (CleanResult*)l;
+        if (r) {
+            g_ballCleaning = false;
+            // 球只有 64px，标签得短：负号表示"减掉了多少"
+            g_ballToast = r->freedMB >= 1024 ? Fmt(L"-%.1fG", r->freedMB / 1024.0)
+                                            : Fmt(L"-%.0fM", r->freedMB);
+            g_ballToastUntil = GetTickCount() + 2800;
+            HWND main = GetParent(h);
+            if (main && IsWindow(main))
+                PostMessageW(main, WM_APP_SNAPSHOT + 2, 0, (LPARAM)new CleanResult(*r));
+            delete r;
+        }
+        BallKick();
         return 0;
     }
+
     case WM_LBUTTONDOWN:
         SetCapture(h);
         g_ballDrag = true;
         g_ballMoved = false;
+        g_ballPressT = 1.0;
         GetCursorPos(&g_dragOrigin);
         {
             RECT r{};
@@ -1484,32 +1665,66 @@ static LRESULT CALLBACK BallProc(HWND h, UINT m, WPARAM w, LPARAM l) {
             g_winOrigin.x = r.left;
             g_winOrigin.y = r.top;
         }
+        BallKick();
         return 0;
-    case WM_MOUSEMOVE:
+
+    case WM_MOUSEMOVE: {
         if (g_ballDrag) {
             POINT p;
             GetCursorPos(&p);
             int dx = p.x - g_dragOrigin.x, dy = p.y - g_dragOrigin.y;
             if (abs(dx) > 3 || abs(dy) > 3) g_ballMoved = true;
-            MoveWindow(h, g_winOrigin.x + dx, g_winOrigin.y + dy, BALL_SIZE, BALL_SIZE, TRUE);
+            MoveWindow(h, g_winOrigin.x + dx, g_winOrigin.y + dy, BALL_W, BALL_W, TRUE);
+        } else if (!g_ballHovering) {
+            g_ballHovering = true;
+            g_ballHoverT = 1.0;
+            TRACKMOUSEEVENT tme{ sizeof(tme) };
+            tme.dwFlags = TME_LEAVE;
+            tme.hwndTrack = h;
+            TrackMouseEvent(&tme);
+            BallKick();
         }
         return 0;
-    case WM_LBUTTONUP:
+    }
+
+    case WM_MOUSELEAVE:
+        if (!g_ballDrag) {
+            g_ballHovering = false;
+            g_ballHoverT = 0;
+            BallKick();
+        }
+        return 0;
+
+    case WM_LBUTTONUP: {
         ReleaseCapture();
         g_ballDrag = false;
-        if (g_ballMoved) {
-            SaveBallPos();
-        } else {
+        g_ballPressT = 0;
+        BallKick();
+
+        if (g_ballMoved) { SaveBallPos(); return 0; }
+
+        // 单击清理，双击打开窗口：用 260ms 的延迟把两者分开
+        DWORD now = GetTickCount();
+        if (g_ballLastClick && now - g_ballLastClick <= (DWORD)GetDoubleClickTime()) {
+            KillTimer(h, BALL_TMR_CLICK);
+            g_ballLastClick = 0;
             HWND main = GetParent(h);
             if (main) ShowFromTray(main);
+        } else {
+            g_ballLastClick = now;
+            SetTimer(h, BALL_TMR_CLICK, 260, nullptr);
         }
         return 0;
+    }
+
     case WM_RBUTTONUP: {
         POINT pt;
         GetCursorPos(&pt);
         HMENU menu = CreatePopupMenu();
         AppendMenuW(menu, MF_STRING, IDM_TRAY_SHOW, L"打开主窗口");
+        AppendMenuW(menu, MF_STRING, 2110, L"立即清理内存");
         AppendMenuW(menu, MF_STRING, 2101, L"隐藏悬浮球");
+        AppendMenuW(menu, MF_SEPARATOR, 0, nullptr);
         AppendMenuW(menu, MF_STRING, IDM_TRAY_EXIT, L"退出");
         SetForegroundWindow(h);
         int cmd = (int)TrackPopupMenu(menu, TPM_RETURNCMD | TPM_RIGHTBUTTON,
@@ -1517,16 +1732,20 @@ static LRESULT CALLBACK BallProc(HWND h, UINT m, WPARAM w, LPARAM l) {
         DestroyMenu(menu);
         HWND main = GetParent(h);
         if (cmd == IDM_TRAY_SHOW && main) ShowFromTray(main);
+        else if (cmd == 2110) BallStartClean(h);
         else if (cmd == 2101) ShowWindow(h, SW_HIDE), g_ballOn = false, RegSetStr(L"ball", L"0");
         else if (cmd == IDM_TRAY_EXIT && main) DestroyWindow(main);
         return 0;
     }
+
+    case WM_ERASEBKGND:
+        return 1;
     }
     return DefWindowProcW(h, m, w, l);
 }
 
 static void CreateBall(HWND owner) {
-    if (g_ball) { ShowWindow(g_ball, SW_SHOW); return; }
+    if (g_ball) { ShowWindow(g_ball, SW_SHOW); RenderBall(); return; }
 
     static bool registered = false;
     if (!registered) {
@@ -1540,23 +1759,47 @@ static void CreateBall(HWND owner) {
         registered = true;
     }
 
-    int x = g_ballX >= 0 ? g_ballX : (GetSystemMetrics(SM_CXSCREEN) - BALL_SIZE - 40);
+    int x = g_ballX >= 0 ? g_ballX : (GetSystemMetrics(SM_CXSCREEN) - BALL_W - S(40));
     int y = g_ballY >= 0 ? g_ballY : (GetSystemMetrics(SM_CYSCREEN) / 3);
     g_ball = CreateWindowExW(WS_EX_TOPMOST | WS_EX_TOOLWINDOW | WS_EX_LAYERED,
                              L"AITaskBallWnd", L"", WS_POPUP,
-                             x, y, BALL_SIZE, BALL_SIZE, owner, nullptr,
+                             x, y, BALL_W, BALL_W, owner, nullptr,
                              GetModuleHandleW(nullptr), nullptr);
     if (!g_ball) return;
 
-    // 圆形 + 轻微透明
-    HRGN rgn = CreateEllipticRgn(0, 0, BALL_SIZE, BALL_SIZE);
+    g_ballPct = g_snap.ramPct;
+
+    // 只有球体本身响应鼠标，阴影留白点不到
+    int m = (BALL_W - BALL_D) / 2 + S(2);
+    HRGN rgn = CreateEllipticRgn(m, m, BALL_W - m, BALL_W - m);
     SetWindowRgn(g_ball, rgn, TRUE);
-    SetLayeredWindowAttributes(g_ball, 0, 235, LWA_ALPHA);
+
     ShowWindow(g_ball, SW_SHOW);
+    RenderBall();
+
+    // 光看球不知道能点，给个提示
+    g_ballTip = CreateWindowExW(WS_EX_TOPMOST, TOOLTIPS_CLASSW, nullptr,
+                                WS_POPUP | TTS_ALWAYSTIP | TTS_NOPREFIX,
+                                CW_USEDEFAULT, CW_USEDEFAULT, CW_USEDEFAULT, CW_USEDEFAULT,
+                                nullptr, nullptr, GetModuleHandleW(nullptr), nullptr);
+    if (g_ballTip) {
+        TOOLINFOW ti{};
+        ti.cbSize = sizeof(ti);
+        ti.uFlags = TTF_SUBCLASS | TTF_IDISHWND;
+        ti.hwnd = g_ball;
+        ti.uId = (UINT_PTR)g_ball;
+        static wchar_t tipText[] = L"单击：清理内存\n双击：打开主窗口\n右键：更多";
+        ti.lpszText = tipText;
+        SendMessageW(g_ballTip, TTM_ADDTOOLW, 0, (LPARAM)&ti);
+        SendMessageW(g_ballTip, TTM_SETDELAYTIME, TTDT_INITIAL, MAKELPARAM(600, 0));
+    }
 }
 
 static void DestroyBall() {
+    if (g_ballTip) { DestroyWindow(g_ballTip); g_ballTip = nullptr; }
     if (g_ball) { DestroyWindow(g_ball); g_ball = nullptr; }
+    if (g_ballMemDC) { DeleteDC(g_ballMemDC); g_ballMemDC = nullptr; }
+    if (g_ballDib) { DeleteObject(g_ballDib); g_ballDib = nullptr; }
 }
 
 // ------------------------------------------------------------------ 托盘
@@ -2177,7 +2420,7 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
             RegSetStr(L"ball", g_ballOn ? L"1" : L"0");
             if (g_ballOn) CreateBall(hwnd);
             else ShowWindow(g_ball, SW_HIDE);
-            AppendChat(g_ballOn ? L"悬浮球已显示，可拖动，点一下打开窗口。"
+            AppendChat(g_ballOn ? L"悬浮球已显示：单击清理内存，双击打开窗口，右键有菜单。"
                                 : L"悬浮球已隐藏（托盘菜单可再开）。");
         } else if (id == IDM_TRAY_CLEAN) {
             AppendChat(L"正在整理内存…");
@@ -2373,6 +2616,12 @@ int WINAPI wWinMain(HINSTANCE hInst, HINSTANCE, LPWSTR lpCmdLine, int) {
     ApplyTheme(ModeToGlass(g_mode));
 
     InitCommonControls();
+
+    // 悬浮球用 GDI+ 画（圆和弧要抗锯齿），其他地方仍走纯 GDI
+    Gdiplus::GdiplusStartupInput gsi;
+    ULONG_PTR gdipToken = 0;
+    Gdiplus::GdiplusStartup(&gdipToken, &gsi, nullptr);
+
     g_weightsGB = WeightsGB();
 
     HDC screenDC = GetDC(nullptr);
@@ -2430,5 +2679,7 @@ int WINAPI wWinMain(HINSTANCE hInst, HINSTANCE, LPWSTR lpCmdLine, int) {
         TranslateMessage(&msg);
         DispatchMessageW(&msg);
     }
+
+    Gdiplus::GdiplusShutdown(gdipToken);
     return 0;
 }
