@@ -328,9 +328,30 @@ git tag -a v0.3.0 -m "v0.3.0 — 这次改了什么"
 git push origin v0.3.0
 ```
 
-自动发布的版本号取自 `AUTO_VERSION_BASE` + 工作流运行号，前缀在 `.github/workflows/build.yml` 的 `env` 里，换大版本时改这一行即可。
+### 自动发布的版本号怎么调
 
-用标签发的那条走 GitHub 自动生成的 changelog；自动发的那条直接用提交说明当正文，方便在 Releases 列表里一眼看出这次改了什么。
+版本号 = `AUTO_VERSION_BASE` + 工作流运行号，基数只在一个地方：
+
+```yaml
+# .github/workflows/build.yml
+jobs:
+  windows:
+    runs-on: windows-latest
+    env:
+      AUTO_VERSION_BASE: v0.2      # ← 换大版本只改这一行
+```
+
+| 场景 | 要做什么 |
+|---|---|
+| 日常提交 | 什么都不用管，`v0.2.21`、`v0.2.22` 自己往上走 |
+| 发了正式版 `v0.3.0` | **同时**把 `AUTO_VERSION_BASE` 改成 `v0.3` |
+| 忘了改会怎样 | 后续自动版仍是 `v0.2.x`，比 `v0.3.0` 小，Releases 顶上的 **Latest** 徽章会跳回旧版本 |
+| 想换个号段重来 | 改完提交就行，新前缀从当前的 `run_number` 继续数（出现 `v0.3.58` 这种号是正常的） |
+
+两点容易误会的地方：
+
+- `run_number` 是**整个仓库累计的流水线次数**，不是版本内的序号，所以同一大版本里的尾号是跳着的——它只保证严格递增
+- 自动版的正文用的是提交说明，标签版（`git tag -a v0.3.0`）用的是 GitHub 自动生成的 changelog，两种都留，方便区分「日常构建」和「正式版」
 
 ## 技术栈
 
