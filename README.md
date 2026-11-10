@@ -315,18 +315,20 @@ python tools/make_mono.py
 
 | 触发 | 动作 |
 |---|---|
-| push 到 main / PR | 用 MSVC 编译，产物作为 artifact 存 30 天 |
-| 打 `v*` 标签 | 编译后自动创建 Release，附上 `AITaskManager.exe` |
+| push 到 main | 用 MSVC 编译 → artifact 存 30 天 → **自动发一版 `v0.2.<运行号>`** |
+| 打 `v*` 标签 | 编译 → 用标签号发 Release（想给正式版起名字时用） |
+| Pull Request | 只编译，不发布 |
 
-发新版流程：
+也就是说**日常提交不用管版本号**，推上去约 40 秒后 https://github.com/Wike-CHI/ai-task-manager/releases 就会出现新条目，`v0.2.<run_number>` 严格递增，附件是 `AITaskManager.exe`。
+
+要发一个语义化的正式版：
 
 ```bash
-git tag -a v0.1.1 -m "v0.1.1 — 修了什么"
-git push origin v0.1.1
-# 约 40 秒后 https://github.com/Wike-CHI/ai-task-manager/releases 出现新版本
+git tag -a v0.3.0 -m "v0.3.0 — 这次改了什么"
+git push origin v0.3.0
 ```
 
-Release 说明由 GitHub 自动生成（对比上个 tag 的提交），无需手写。
+Release 说明由 GitHub 对比上一个 tag 自动生成，无需手写。
 
 ## 技术栈
 
