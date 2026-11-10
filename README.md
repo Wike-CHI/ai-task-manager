@@ -328,7 +328,9 @@ git tag -a v0.3.0 -m "v0.3.0 — 这次改了什么"
 git push origin v0.3.0
 ```
 
-Release 说明由 GitHub 对比上一个 tag 自动生成，无需手写。
+自动发布的版本号取自 `AUTO_VERSION_BASE` + 工作流运行号，前缀在 `.github/workflows/build.yml` 的 `env` 里，换大版本时改这一行即可。
+
+用标签发的那条走 GitHub 自动生成的 changelog；自动发的那条直接用提交说明当正文，方便在 Releases 列表里一眼看出这次改了什么。
 
 ## 技术栈
 
