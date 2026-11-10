@@ -1703,6 +1703,136 @@ static void ApplyListColumns() {
     for (int i = 0; i < 5; ++i) ListView_SetColumnWidth(g_list, i, w[i]);
 }
 
+// ------------------------------------------------------------------ 自绘按钮
+static std::map<HWND, bool> g_hoverBtns;
+
+static COLORREF LerpColor(COLORREF a, COLORREF b, double t) {
+    t = std::max(0.0, std::min(1.0, t));
+    return RGB((int)(GetRValue(a) + (GetRValue(b) - GetRValue(a)) * t),
+               (int)(GetGValue(a) + (GetGValue(b) - GetGValue(a)) * t),
+               (int)(GetBValue(a) + (GetBValue(b) - GetBValue(a)) * t));
+}
+
+static void FillSolid(HDC dc, const RECT& rc, COLORREF color) {
+    HBRUSH b = CreateSolidBrush(color);
+    FillRect(dc, &rc, b);
+    DeleteObject(b);
+}
+
+// 圆角外那四个小角要露出父窗口的底色，按父窗口的渐变位置现算一个同色
+static void PaintParentBg(HDC dc, HWND btn, const RECT& rc) {
+    HWND parent = GetParent(btn);
+    RECT pr{};
+    GetClientRect(parent, &pr);
+    RECT br{};
+    GetWindowRect(btn, &br);
+    MapWindowPoints(nullptr, parent, (POINT*)&br, 2);
+
+    int H = pr.bottom > 0 ? (int)pr.bottom : 1;
+    if (g_theme.glass) {
+        COLORREF top = LerpColor(g_theme.bg1, g_theme.bg2, (double)br.top / H);
+        COLORREF bot = LerpColor(g_theme.bg1, g_theme.bg2, (double)br.bottom / H);
+        VGradient(dc, rc.left, rc.top, rc.right - rc.left, rc.bottom - rc.top, top, bot, 255, 255);
+    } else {
+        FillSolid(dc, rc, C_BG);
+    }
+}
+
+static void OnDrawItem(LPDRAWITEMSTRUCT di) {
+    if (di->CtlType != ODT_BUTTON) return;
+
+    HDC dc = di->hDC;
+    RECT rc = di->rcItem;
+    const bool pressed  = (di->itemState & ODS_SELECTED) != 0;
+    const bool disabled = (di->itemState & ODS_DISABLED) != 0;
+    const bool focus    = (di->itemState & ODS_FOCUS) != 0;
+    auto it = g_hoverBtns.find(di->hwndItem);
+    const bool hover = (it != g_hoverBtns.end()) && it->second;
+
+    PaintParentBg(dc, di->hwndItem, rc);
+
+    COLORREF top, bot, border;
+    if (g_theme.glass) {
+        if (pressed)      { top = RGB(207, 230, 246); bot = RGB(191, 220, 241); border = RGB(134, 187, 220); }
+        else if (hover)   { top = RGB(255, 255, 255); bot = RGB(216, 237, 251); border = RGB(121, 190, 232); }
+        else              { top = RGB(255, 255, 255); bot = RGB(233, 244, 252); border = RGB(169, 203, 229); }
+    } else {
+        if (pressed)      { top = RGB(30, 34, 44);  bot = RGB(35, 39, 51); border = RGB(59, 65, 80); }
+        else if (hover)   { top = RGB(59, 65, 87);  bot = RGB(48, 54, 71); border = RGB(85, 96, 128); }
+        else              { top = RGB(51, 55, 74);  bot = RGB(40, 44, 57); border = RGB(69, 75, 95); }
+    }
+
+    const int radius = S(6);
+    HRGN shape = CreateRoundRectRgn(rc.left, rc.top, rc.right + 1, rc.bottom + 1, radius, radius);
+    SelectClipRgn(dc, shape);
+
+    VGradient(dc, rc.left, rc.top, rc.right - rc.left, rc.bottom - rc.top, top, bot, 255, 255);
+    if (!pressed && !disabled)
+        FillAlpha(dc, rc.left, rc.top + S(1), rc.right - rc.left,
+                  (rc.bottom - rc.top) / 2, RGB(255, 255, 255), 45);
+
+    // 底部内亮线：给按钮一点厚度，不像贴纸
+    if (!disabled)
+        FillAlpha(dc, rc.left + S(2), rc.bottom - S(2), rc.right - rc.left - S(4), S(1),
+                  RGB(255, 255, 255), 110);
+
+    SelectClipRgn(dc, nullptr);
+    DeleteObject(shape);
+
+    HPEN pen = CreatePen(PS_SOLID, 1, border);
+    HGDIOBJ oldPen = SelectObject(dc, pen);
+    HGDIOBJ oldBr = SelectObject(dc, GetStockObject(NULL_BRUSH));
+    RoundRect(dc, rc.left, rc.top, rc.right - 1, rc.bottom - 1, radius, radius);
+    SelectObject(dc, oldBr);
+    SelectObject(dc, oldPen);
+    DeleteObject(pen);
+
+    wchar_t text[128]{};
+    int len = GetWindowTextW(di->hwndItem, text, 128);
+
+    HFONT f = (HFONT)SendMessageW(di->hwndItem, WM_GETFONT, 0, 0);
+    HGDIOBJ oldFont = f ? SelectObject(dc, f) : nullptr;
+    int oldMode = SetBkMode(dc, TRANSPARENT);
+    SetTextColor(dc, disabled ? C_DIM : C_TEXT);
+
+    RECT tr = rc;
+    if (pressed) OffsetRect(&tr, 0, S(1));
+    DrawTextW(dc, text, len, &tr, DT_CENTER | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS);
+
+    SetBkMode(dc, oldMode);
+    if (oldFont) SelectObject(dc, oldFont);
+
+    if (focus && !pressed && !hover) {   // 鼠标点击后不留虚线框，键盘 Tab 过来才显示
+        RECT fr = rc;
+        InflateRect(&fr, -S(4), -S(4));
+        DrawFocusRect(dc, &fr);
+    }
+}
+
+static LRESULT CALLBACK BtnProc(HWND h, UINT m, WPARAM w, LPARAM l, UINT_PTR, DWORD_PTR) {
+    switch (m) {
+    case WM_MOUSEMOVE: {
+        TRACKMOUSEEVENT tme{ sizeof(tme) };
+        tme.dwFlags = TME_LEAVE;
+        tme.hwndTrack = h;
+        TrackMouseEvent(&tme);
+        if (!g_hoverBtns[h]) {
+            g_hoverBtns[h] = true;
+            InvalidateRect(h, nullptr, FALSE);      // 自己整块重画，不用系统先擦一遍（会闪）
+        }
+        break;
+    }
+    case WM_MOUSELEAVE:
+        g_hoverBtns[h] = false;
+        InvalidateRect(h, nullptr, FALSE);
+        break;
+    case WM_SETCURSOR:
+        SetCursor(LoadCursorW(nullptr, IDC_HAND));
+        return TRUE;
+    }
+    return DefSubclassProc(h, m, w, l);
+}
+
 // 行悬停：只在换了行的时候重画那两行，避免整表闪
 static LRESULT CALLBACK ListProc(HWND h, UINT m, WPARAM w, LPARAM l, UINT_PTR, DWORD_PTR) {
     switch (m) {
@@ -1871,9 +2001,11 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
             { ID_BTN_COPY,    L"复制快照", S(722), S(574), S(88), S(30) },
             { ID_BTN_THEME,   L"换主题",   S(814), S(574), S(88), S(30) },
         };
-        for (auto& b : btns)
-            CreateWindowExW(0, L"BUTTON", b.t, WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON,
-                            b.x, b.y, b.w, b.h, hwnd, (HMENU)(INT_PTR)b.id, hInst, nullptr);
+        for (auto& b : btns) {
+            HWND btn = CreateWindowExW(0, L"BUTTON", b.t, WS_CHILD | WS_VISIBLE | BS_OWNERDRAW,
+                                       b.x, b.y, b.w, b.h, hwnd, (HMENU)(INT_PTR)b.id, hInst, nullptr);
+            if (btn) SetWindowSubclass(btn, BtnProc, 2, 0);
+        }
 
         // 按钮上写的是"点了会切成什么"，启动时按当前主题同步
         SetWindowTextW(GetDlgItem(hwnd, ID_BTN_THEME), ModeName((g_mode + 1) % 3));
@@ -2129,6 +2261,10 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
         InvalidateRect(hwnd, nullptr, FALSE);
         return 0;
     }
+    case WM_DRAWITEM:
+        OnDrawItem((LPDRAWITEMSTRUCT)lp);
+        return TRUE;
+
     case WM_NOTIFY: {
         auto* nh = (LPNMHDR)lp;
         if (nh->code == NM_CUSTOMDRAW) {
