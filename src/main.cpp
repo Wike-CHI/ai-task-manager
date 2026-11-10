@@ -1403,6 +1403,192 @@ static CleanResult CleanMemory() {
     return r;
 }
 
+// ------------------------------------------------------------------ 气泡提示
+// 球只有 64px，塞不下"538 个进程 / 释放 8.0 GB"，用独立的分层窗口弹出来
+#define TOAST_TMR      21
+#define TOAST_IN_MS    150
+#define TOAST_HOLD_MS  2600
+#define TOAST_OUT_MS   220
+
+static HWND    g_toast = nullptr;
+static HDC     g_toastDC = nullptr;
+static HBITMAP g_toastDib = nullptr;
+static int     g_toastW = 0, g_toastH = 0;
+static int     g_toastAlpha = 0;
+static int     g_toastPhase = 0;        // 0=淡入 1=停留 2=淡出
+static DWORD   g_toastT0 = 0;
+static std::wstring g_toastL1, g_toastL2;
+
+static void ToastPaint() {
+    if (!g_toast || !g_toastDib) return;
+    HGDIOBJ old = SelectObject(g_toastDC, g_toastDib);
+
+    RECT wr{};
+    GetWindowRect(g_toast, &wr);
+    POINT dst{ wr.left, wr.top };
+    SIZE sz{ g_toastW, g_toastH };
+    POINT src{ 0, 0 };
+    BLENDFUNCTION bf{ AC_SRC_OVER, 0, (BYTE)g_toastAlpha, AC_SRC_ALPHA };
+    HDC screen = GetDC(nullptr);
+    UpdateLayeredWindow(g_toast, screen, &dst, &sz, g_toastDC, &src, 0, &bf, ULW_ALPHA);
+    ReleaseDC(nullptr, screen);
+
+    SelectObject(g_toastDC, old);
+}
+
+static void ToastHide() {
+    if (!g_toast) return;
+    KillTimer(g_toast, TOAST_TMR);
+    ShowWindow(g_toast, SW_HIDE);
+    g_toastPhase = 0;
+    g_toastAlpha = 0;
+    if (g_toastDC) { DeleteDC(g_toastDC); g_toastDC = nullptr; }
+    if (g_toastDib) { DeleteObject(g_toastDib); g_toastDib = nullptr; }
+}
+
+static LRESULT CALLBACK ToastProc(HWND h, UINT m, WPARAM w, LPARAM l) {
+    if (m == WM_TIMER && w == TOAST_TMR) {
+        DWORD dt = GetTickCount() - g_toastT0;
+        if (g_toastPhase == 0) {
+            g_toastAlpha = (int)std::min<DWORD>(255, 255 * dt / TOAST_IN_MS);
+            if (dt >= TOAST_IN_MS) { g_toastPhase = 1; g_toastT0 = GetTickCount(); g_toastAlpha = 255; }
+        } else if (g_toastPhase == 1) {
+            if (dt >= TOAST_HOLD_MS) { g_toastPhase = 2; g_toastT0 = GetTickCount(); }
+        } else {
+            int k = (int)std::min<DWORD>(TOAST_OUT_MS, dt);
+            g_toastAlpha = 255 - 255 * k / TOAST_OUT_MS;
+            if (dt >= TOAST_OUT_MS) { ToastHide(); return 0; }
+        }
+        ToastPaint();
+        return 0;
+    }
+    if (m == WM_ERASEBKGND) return 1;
+    return DefWindowProcW(h, m, w, l);
+}
+
+static void ToastShow(int count, double freedMB) {
+    if (!g_toast) {
+        static bool reg = false;
+        if (!reg) {
+            WNDCLASSEXW wc{};
+            wc.cbSize = sizeof(wc);
+            wc.lpfnWndProc = ToastProc;
+            wc.hInstance = GetModuleHandleW(nullptr);
+            wc.lpszClassName = L"AITMToastWnd";
+            RegisterClassExW(&wc);
+            reg = true;
+        }
+        g_toast = CreateWindowExW(WS_EX_TOPMOST | WS_EX_TOOLWINDOW | WS_EX_LAYERED | WS_EX_NOACTIVATE | WS_EX_TRANSPARENT,
+                                  L"AITMToastWnd", L"", WS_POPUP,
+                                  0, 0, 10, 10, nullptr, nullptr, GetModuleHandleW(nullptr), nullptr);
+        if (!g_toast) return;
+    }
+
+    ToastHide();
+
+    g_toastL1 = Fmt(L"整理完成 · %d 个进程", count);
+    g_toastL2 = freedMB >= 1024 ? Fmt(L"工作集释放 %.1f GB", freedMB / 1024.0)
+                                : Fmt(L"工作集释放 %.0f MB", freedMB);
+
+    Gdiplus::FontFamily fam(L"Microsoft YaHei UI");
+    Gdiplus::Font f1(&fam, (Gdiplus::REAL)S(13), Gdiplus::FontStyleRegular, Gdiplus::UnitPixel);
+    Gdiplus::Font f2(&fam, (Gdiplus::REAL)S(12), Gdiplus::FontStyleRegular, Gdiplus::UnitPixel);
+
+    Gdiplus::RectF b1{}, b2{};
+    {
+        Gdiplus::Bitmap probe(1, 1, 4, PixelFormat32bppPARGB, nullptr);
+        Gdiplus::Graphics pg(&probe);
+        Gdiplus::StringFormat sf;
+        pg.MeasureString(g_toastL1.c_str(), -1, &f1, Gdiplus::PointF(0, 0), &sf, &b1);
+        pg.MeasureString(g_toastL2.c_str(), -1, &f2, Gdiplus::PointF(0, 0), &sf, &b2);
+    }
+
+    const int padX = S(16), padY = S(12), iconW = S(24), gap = S(10);
+    const int textW = (int)std::max(b1.Width, b2.Width) + S(2);
+    g_toastW = padX * 2 + iconW + gap + textW;
+    g_toastH = padY * 2 + (int)b1.Height + (int)b2.Height + S(3);
+
+    HDC screen = GetDC(nullptr);
+    BITMAPINFO bi{};
+    bi.bmiHeader.biSize = sizeof(BITMAPINFOHEADER);
+    bi.bmiHeader.biWidth = g_toastW;
+    bi.bmiHeader.biHeight = -g_toastH;
+    bi.bmiHeader.biPlanes = 1;
+    bi.bmiHeader.biBitCount = 32;
+    bi.bmiHeader.biCompression = BI_RGB;
+    void* bits = nullptr;
+    g_toastDib = CreateDIBSection(screen, &bi, DIB_RGB_COLORS, &bits, nullptr, 0);
+    g_toastDC = CreateCompatibleDC(screen);
+    ReleaseDC(nullptr, screen);
+    if (!g_toastDib || !g_toastDC) { ToastHide(); return; }
+    memset(bits, 0, (size_t)g_toastW * g_toastH * 4);
+
+    {
+        Gdiplus::Bitmap bmp(g_toastW, g_toastH, g_toastW * 4, PixelFormat32bppPARGB, (BYTE*)bits);
+        Gdiplus::Graphics g(&bmp);
+        g.SetSmoothingMode(Gdiplus::SmoothingModeAntiAlias);
+        g.SetTextRenderingHint(Gdiplus::TextRenderingHintAntiAliasGridFit);
+
+        const Gdiplus::REAL rr = (Gdiplus::REAL)S(10);
+        const Gdiplus::REAL wR = (Gdiplus::REAL)g_toastW, hR = (Gdiplus::REAL)g_toastH;
+        Gdiplus::GraphicsPath path;
+        path.AddArc(0.5f, 0.5f, rr, rr, 180.0f, 90.0f);
+        path.AddArc(wR - rr - 0.5f, 0.5f, rr, rr, 270.0f, 90.0f);
+        path.AddArc(wR - rr - 0.5f, hR - rr - 0.5f, rr, rr, 0.0f, 90.0f);
+        path.AddArc(0.5f, hR - rr - 0.5f, rr, rr, 90.0f, 90.0f);
+        path.CloseFigure();
+
+        Gdiplus::SolidBrush bg(Gdiplus::Color(244, 26, 29, 38));
+        g.FillPath(&bg, &path);
+        Gdiplus::Pen edge(Gdiplus::Color(46, 255, 255, 255), 1.0f);
+        g.DrawPath(&edge, &path);
+
+        // 左侧勾：一个绿圆 + 两道白线，比 emoji 稳定
+        float iconCx = padX + iconW / 2.0f, iconCy = g_toastH / 2.0f;
+        Gdiplus::SolidBrush ok(Gdiplus::Color(255, 66, 208, 142));
+        g.FillEllipse(&ok, iconCx - iconW / 2.0f, iconCy - iconW / 2.0f, (Gdiplus::REAL)iconW, (Gdiplus::REAL)iconW);
+        Gdiplus::Pen tick(Gdiplus::Color(255, 22, 24, 30), (Gdiplus::REAL)S(2));
+        tick.SetStartCap(Gdiplus::LineCapRound);
+        tick.SetEndCap(Gdiplus::LineCapRound);
+        float tx = iconCx - S(5), ty = iconCy;
+        g.DrawLine(&tick, tx, ty, tx + S(3), ty + S(3));
+        g.DrawLine(&tick, tx + S(3), ty + S(3), tx + S(8), ty - S(4));
+
+        float textX = (float)(padX + iconW + gap);
+        Gdiplus::SolidBrush t1(Gdiplus::Color(255, 237, 241, 248));
+        Gdiplus::SolidBrush t2(Gdiplus::Color(255, 110, 231, 183));
+        Gdiplus::StringFormat sf;
+        sf.SetAlignment(Gdiplus::StringAlignmentNear);
+        g.DrawString(g_toastL1.c_str(), -1, &f1, Gdiplus::PointF(textX, (Gdiplus::REAL)padY), &sf, &t1);
+        g.DrawString(g_toastL2.c_str(), -1, &f2,
+                     Gdiplus::PointF(textX, (Gdiplus::REAL)padY + b1.Height + S(2)), &sf, &t2);
+    }
+
+    // 摆在球上方，顶不下就放下方
+    RECT br{}, work{};
+    GetWindowRect(g_ball, &br);
+    // 球可能在外接屏上，这里要按球所在那块屏的工作区摆，不能用主屏的
+    MONITORINFO mi{ sizeof(mi) };
+    HMONITOR mon = MonitorFromWindow(g_ball, MONITOR_DEFAULTTONEAREST);
+    if (mon && GetMonitorInfoW(mon, &mi))
+        work = mi.rcWork;
+    else
+        SystemParametersInfoW(SPI_GETWORKAREA, 0, &work, 0);
+    int bx = br.left + ((br.right - br.left) - g_toastW) / 2;
+    int by = br.top - g_toastH - S(10);
+    if (by < work.top + S(4)) by = br.bottom + S(10);
+    bx = std::max((int)work.left + S(4), std::min(bx, (int)work.right - g_toastW - S(4)));
+
+    SetWindowPos(g_toast, HWND_TOPMOST, bx, by, g_toastW, g_toastH,
+                 SWP_NOACTIVATE | SWP_SHOWWINDOW);
+
+    g_toastPhase = 0;
+    g_toastAlpha = 0;
+    g_toastT0 = GetTickCount();
+    SetTimer(g_toast, TOAST_TMR, 16, nullptr);
+    ToastPaint();
+}
+
 // ------------------------------------------------------------------ 悬浮球
 #define BALL_W        S(88)                 // 窗口（球 + 阴影留白）
 #define BALL_D        S(64)                 // 球本体直径
@@ -1420,8 +1606,6 @@ static double g_ballHover = 0, g_ballHoverT = 0;
 static double g_ballPress = 0, g_ballPressT = 0;
 static double g_ballSpin = 0;
 static bool   g_ballCleaning = false;
-static std::wstring g_ballToast;
-static DWORD  g_ballToastUntil = 0;
 static DWORD  g_ballLastClick = 0;
 
 static inline Gdiplus::REAL SR(int v) { return (Gdiplus::REAL)S(v); }
@@ -1546,7 +1730,6 @@ static void RenderBall() {
             std::wstring label = L"内存";
             Gdiplus::Color lc(255, 136, 146, 170);
             if (g_ballCleaning)                      { label = L"清理中"; lc = Gdiplus::Color(255, 120, 205, 255); }
-            else if (g_ballToastUntil > GetTickCount()) { label = g_ballToast; lc = Gdiplus::Color(255, 110, 231, 183); }
             else if (g_ballHover > 0.5)              { label = L"点击清理"; lc = Gdiplus::Color(255, 127, 212, 255); }
 
             Gdiplus::Font f(&fam, (Gdiplus::REAL)S(9), Gdiplus::FontStyleRegular, Gdiplus::UnitPixel);
@@ -1583,7 +1766,6 @@ static void BallStartClean(HWND h) {
     if (g_ballCleaning) return;
     g_ballCleaning = true;
     g_ballSpin = 0;
-    g_ballToast.clear();
     BallKick();
     std::thread([h]() {
         CleanResult r = CleanMemory();
@@ -1616,10 +1798,6 @@ static bool BallTick(HWND h) {
         if (g_ballSpin >= 360) g_ballSpin -= 360;
         changed = true;
     }
-    if (!g_ballToast.empty() && GetTickCount() > g_ballToastUntil) {
-        g_ballToast.clear();
-        changed = true;
-    }
 
     if (changed) RenderBall();
     return changed;
@@ -1640,10 +1818,7 @@ static LRESULT CALLBACK BallProc(HWND h, UINT m, WPARAM w, LPARAM l) {
         auto* r = (CleanResult*)l;
         if (r) {
             g_ballCleaning = false;
-            // 球只有 64px，标签得短：负号表示"减掉了多少"
-            g_ballToast = r->freedMB >= 1024 ? Fmt(L"-%.1fG", r->freedMB / 1024.0)
-                                            : Fmt(L"-%.0fM", r->freedMB);
-            g_ballToastUntil = GetTickCount() + 2800;
+            ToastShow(r->count, r->freedMB);
             HWND main = GetParent(h);
             if (main && IsWindow(main))
                 PostMessageW(main, WM_APP_SNAPSHOT + 2, 0, (LPARAM)new CleanResult(*r));
@@ -1654,6 +1829,7 @@ static LRESULT CALLBACK BallProc(HWND h, UINT m, WPARAM w, LPARAM l) {
     }
 
     case WM_LBUTTONDOWN:
+        ToastHide();
         SetCapture(h);
         g_ballDrag = true;
         g_ballMoved = false;
@@ -1796,6 +1972,8 @@ static void CreateBall(HWND owner) {
 }
 
 static void DestroyBall() {
+    ToastHide();
+    if (g_toast) { DestroyWindow(g_toast); g_toast = nullptr; }
     if (g_ballTip) { DestroyWindow(g_ballTip); g_ballTip = nullptr; }
     if (g_ball) { DestroyWindow(g_ball); g_ball = nullptr; }
     if (g_ballMemDC) { DeleteDC(g_ballMemDC); g_ballMemDC = nullptr; }
