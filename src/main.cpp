@@ -59,7 +59,7 @@ static const wchar_t* APP_TITLE = L"AI 任务管理器";
 #define IDM_TRAY_CLEAN   2102
 #define IDM_TRAY_AUTO    2103
 #define IDM_TRAY_THERM   2104
-#define HEADER_H   276
+#define HEADER_H   324
 #define HIST_MAX   90
 #define TIMER_ID   1
 
@@ -87,7 +87,7 @@ struct ProcRow {
     std::vector<DWORD> pids;
 };
 
-struct Sample { double ram, com, vram, gpu, gpuT, cpuT; };
+struct Sample { double ram, com, vram, gpu, gpuT, cpuT, fan; };
 
 struct Snapshot {
     double ramUsedGB = 0, ramTotalGB = 0, ramPct = 0;
@@ -645,7 +645,7 @@ static void FillList() {
 static void PushHistory(const Snapshot& s) {
     Sample x{ s.ramPct, s.comPct,
               s.vramTotal > 0 ? s.vramUsed / s.vramTotal * 100.0 : 0.0, s.gpuUtil,
-              g_temps.gpu, g_temps.cpu };
+              g_temps.gpu, g_temps.cpu, g_temps.fan };
     g_hist[g_histHead] = x;
     g_histHead = (g_histHead + 1) % HIST_MAX;
     if (g_histCount < HIST_MAX) g_histCount++;
@@ -913,6 +913,64 @@ static void PaintChart(HDC dc, int x, int y, int w, int h) {
     TextAt(dc, lx + 214, y + 2, C_BLUE, Fmt(L"● 显存 %.0f%%", gpuNow));
 }
 
+static void PaintCooling(HDC dc, int x, int y, int w) {
+    SetBkMode(dc, TRANSPARENT);
+    if (g_temps.gpu <= 0) {
+        TextAt(dc, x, y + 2, C_DIM, L"散热：没读到 GPU 温度（nvidia-smi 不可用），风扇转速无从对比");
+        return;
+    }
+
+    auto at = [&](int back) {
+        int idx = (g_histHead - 1 - back + HIST_MAX * 2) % HIST_MAX;
+        return g_hist[idx];
+    };
+    const bool hasOld = g_histCount >= 12;          // 约 20 秒前
+    const double fanNow = g_temps.fan;
+    const double fanOld = hasOld ? at(10).fan : -1;
+    const double tNow = g_temps.gpu;
+    const double tOld = hasOld ? at(10).gpuT : -1;
+
+    TextAt(dc, x, y + 11, C_MUTED, L"散热");
+
+    const int lx = x + 52, barX = lx + 74, barW = 170, barH = 9, pitch = 22;
+
+    // 两条同宽的条：一眼看出「转速拉到多少 / 温度压到多少」
+    COLORREF fanColor = fanNow >= 90 ? C_RED : (fanNow >= 70 ? C_AMBER : C_BLUE);
+    COLORREF tColor = tNow >= 83 ? C_RED : (tNow >= 70 ? C_AMBER : C_GREEN);
+
+    TextAt(dc, lx, y + 4, C_MUTED, L"风扇");
+    DrawBar(dc, barX, y + 5, barW, barH, fanNow, fanColor);
+    TextAt(dc, barX + barW + 12, y + 2, C_TEXT, Fmt(L"%.0f%%", fanNow));
+    if (hasOld && fanOld >= 0) {
+        double d = fanNow - fanOld;
+        TextAt(dc, barX + barW + 68, y + 2, C_DIM,
+               std::fabs(d) < 1 ? std::wstring(L"20 秒前持平")
+                                : Fmt(L"20 秒前 %.0f%%（%s%.0f%%）", fanOld,
+                                      d > 0 ? L"+" : L"-", std::fabs(d)));
+    }
+
+    TextAt(dc, lx, y + 2 + pitch, C_MUTED, L"GPU 温度");
+    double tPct = (tNow - 20) / 75 * 100;           // 20~95°C 映射到整条
+    DrawBar(dc, barX, y + 3 + pitch, barW, barH, tPct, tColor);
+    TextAt(dc, barX + barW + 12, y + pitch, C_TEXT, Fmt(L"%.0f°C", tNow));
+    if (hasOld && tOld > 0) {
+        double d = tNow - tOld;
+        TextAt(dc, barX + barW + 68, y + pitch, C_DIM,
+               std::fabs(d) < 1 ? std::wstring(L"20 秒前持平")
+                                : Fmt(L"20 秒前 %.0f°C（%s%.0f°C）", tOld,
+                                      d > 0 ? L"+" : L"-", std::fabs(d)));
+    }
+
+    // 右侧结论：温度和转速放一起才看得出散热够不够
+    const wchar_t* verdict = L"";
+    COLORREF vColor = C_MUTED;
+    if (tNow >= 83 && fanNow >= 85) { verdict = L"高温高转：散热受阻（积灰/风道）"; vColor = C_RED; }
+    else if (tNow >= 83)            { verdict = L"温度偏高，风扇没拉满：查风扇曲线"; vColor = C_AMBER; }
+    else if (fanNow >= 90 && tNow < 60) { verdict = L"转速高但温度低：散热余量充足"; vColor = C_BLUE; }
+    else if (tNow < 60 && fanNow < 40)  { verdict = L"低转速低温度：散热轻松"; vColor = C_GREEN; }
+    if (verdict[0]) TextAt(dc, x + w - 300, y + 13, vColor, verdict);
+}
+
 static void PaintHeader(HDC dc, int w, int h) {
     HFONT font = CreateFontW(14, 0, 0, 0, FW_NORMAL, 0, 0, 0, DEFAULT_CHARSET,
                              OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS, CLEARTYPE_QUALITY,
@@ -959,6 +1017,7 @@ static void PaintHeader(HDC dc, int w, int h) {
     TextAt(dc, 28, 232, C_DIM, Fmt(L"最近 %.0f 秒", g_histCount * 2.0));
     TextAt(dc, w - 60, 232, C_DIM, L"现在");
     TextAt(dc, 24, 248, C_MUTED, Fmt(L"趋势：%s", TrendText().c_str()));
+    PaintCooling(dc, 24, 272, w - 48);
 
     SelectObject(dc, old);
     DeleteObject(font);
