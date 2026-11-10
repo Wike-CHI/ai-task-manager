@@ -22,6 +22,7 @@
 #include <chrono>
 #include <cstdio>
 #include <cstdarg>
+#include <cstdlib>
 #include <cmath>
 #include <fstream>
 #include <sstream>
@@ -59,7 +60,21 @@ static const wchar_t* APP_TITLE = L"AI 任务管理器";
 #define IDM_TRAY_CLEAN   2102
 #define IDM_TRAY_AUTO    2103
 #define IDM_TRAY_THERM   2104
-#define HEADER_H   324
+// 布局一律按 96dpi 的逻辑像素写，S() 换算到当前缩放，避免高 DPI 下被系统拉伸发糊
+static int g_dpi = 96;
+static bool g_dpiForced = false;        // 用 AITM_SCALE 强制缩放，方便验证高 DPI 布局
+static inline int S(int v) { return MulDiv(v, g_dpi, 96); }
+
+static bool InitDpiFromEnvironment() {
+    wchar_t buf[16]{};
+    if (GetEnvironmentVariableW(L"AITM_SCALE", buf, 16) > 0) {
+        double f = _wtof(buf);
+        if (f >= 0.75 && f <= 3.0) { g_dpi = (int)(96 * f + 0.5); return true; }
+    }
+    return false;
+}
+
+#define HEADER_H   S(324)
 #define HIST_MAX   90
 #define TIMER_ID   1
 
@@ -105,6 +120,7 @@ static Snapshot g_snap;
 static CRITICAL_SECTION g_lock;
 static std::atomic<bool> g_busy{false};
 static HWND g_list, g_chat, g_input, g_status;
+static int  g_hoverRow = -1;
 
 static Sample g_hist[HIST_MAX];
 static int g_histCount = 0;
@@ -659,7 +675,7 @@ static void PushHistory(const Snapshot& s) {
 struct Theme {
     bool glass = false;
     COLORREF bg1, bg2, panel, text, muted, dim, grid, borderTop, borderBottom;
-    COLORREF listBg, listAlt, listSel;
+    COLORREF listBg, listAlt, listSel, listHead, listLine, listHover;
 };
 
 static Theme g_theme;
@@ -682,9 +698,12 @@ static void ApplyTheme(bool glass) {
         g_theme.panel      = RGB(255, 255, 255);
         g_theme.borderTop  = RGB(255, 255, 255);
         g_theme.borderBottom = RGB(158, 196, 226);
-        g_theme.listBg  = RGB(247, 251, 254);
-        g_theme.listAlt = RGB(236, 246, 252);
-        g_theme.listSel = RGB(198, 226, 245);
+        g_theme.listBg  = RGB(252, 254, 255);
+        g_theme.listAlt = RGB(240, 248, 253);
+        g_theme.listSel = RGB(186, 219, 242);
+        g_theme.listHead  = RGB(228, 241, 250);
+        g_theme.listLine  = RGB(203, 227, 242);
+        g_theme.listHover = RGB(228, 243, 252);
     } else {
         C_BG     = RGB(24, 25, 31);
         C_PANEL  = RGB(38, 40, 50);
@@ -701,8 +720,11 @@ static void ApplyTheme(bool glass) {
         g_theme.borderTop  = RGB(60, 62, 74);
         g_theme.borderBottom = RGB(15, 16, 20);
         g_theme.listBg  = RGB(30, 31, 38);
-        g_theme.listAlt = RGB(36, 38, 46);
+        g_theme.listAlt = RGB(35, 37, 45);
         g_theme.listSel = RGB(45, 62, 84);
+        g_theme.listHead  = RGB(40, 42, 52);
+        g_theme.listLine  = RGB(54, 57, 70);
+        g_theme.listHover = RGB(44, 47, 58);
     }
 }
 
@@ -780,18 +802,18 @@ static void GlassPanel(HDC dc, int x, int y, int w, int h, int radius = 10) {
 }
 
 static void GlossBand(HDC dc, int w) {
-    VGradient(dc, 0, 0, w, 46, RGB(255, 255, 255), RGB(255, 255, 255), 138, 0);
+    VGradient(dc, 0, 0, w, S(46), RGB(255, 255, 255), RGB(255, 255, 255), 138, 0);
 
-    HRGN sheen = CreateEllipticRgn(w / 2 - 300, -46, w / 2 + 300, 62);
+    HRGN sheen = CreateEllipticRgn(w / 2 - S(300), -S(46), w / 2 + S(300), S(62));
     SelectClipRgn(dc, sheen);
-    FillAlpha(dc, 0, 0, w, 60, RGB(255, 255, 255), 85);
+    FillAlpha(dc, 0, 0, w, S(60), RGB(255, 255, 255), 85);
     SelectClipRgn(dc, nullptr);
     DeleteObject(sheen);
 
     HPEN pen = CreatePen(PS_SOLID, 1, RGB(255, 255, 255));
     HGDIOBJ old = SelectObject(dc, pen);
-    MoveToEx(dc, 0, 46, nullptr);
-    LineTo(dc, w, 46);
+    MoveToEx(dc, 0, S(46), nullptr);
+    LineTo(dc, w, S(46));
     SelectObject(dc, old);
     DeleteObject(pen);
 }
@@ -834,8 +856,8 @@ static void TextAt(HDC dc, int x, int y, COLORREF color, const std::wstring& tex
 static void PaintStat(HDC dc, int x, int y, const wchar_t* name, const std::wstring& value,
                       double pct, COLORREF color) {
     TextAt(dc, x, y, C_MUTED, name);
-    TextAt(dc, x + 62, y, C_TEXT, value);
-    DrawBar(dc, x, y + 18, 220, 10, pct, color);
+    TextAt(dc, x + S(62), y, C_TEXT, value);
+    DrawBar(dc, x, y + S(18), S(220), S(10), pct, color);
 }
 
 static void PaintChart(HDC dc, int x, int y, int w, int h) {
@@ -868,20 +890,20 @@ static void PaintChart(HDC dc, int x, int y, int w, int h) {
     vmax = std::min(100.0, vmax + span * 0.15 + 1);
     if (vmax - vmin < 1) vmax = vmin + 1;
 
-    const int plotX = x + 48, plotW = w - 60, plotH = h - 10;
+    const int plotX = x + S(48), plotW = w - S(60), plotH = h - S(10);
     auto toY = [&](double v) {
         v = std::max(vmin, std::min(vmax, v));
-        return y + h - 4 - (int)((v - vmin) / (vmax - vmin) * (plotH - 8));
+        return y + h - S(4) - (int)((v - vmin) / (vmax - vmin) * (plotH - S(8)));
     };
 
     HPEN grid = CreatePen(PS_DOT, 1, C_GRID);
     HPEN oldPen = (HPEN)SelectObject(dc, grid);
     for (int i = 0; i <= 4; ++i) {
-        int gy = y + 4 + (plotH - 8) * i / 4;
+        int gy = y + S(4) + (plotH - S(8)) * i / 4;
         MoveToEx(dc, plotX, gy, nullptr);
         LineTo(dc, plotX + plotW, gy);
         double v = vmax - (vmax - vmin) * i / 4;
-        TextAt(dc, x + 4, gy - 7, C_DIM, Fmt(L"%.0f%%", v));
+        TextAt(dc, x + S(4), gy - S(7), C_DIM, Fmt(L"%.0f%%", v));
     }
     SelectObject(dc, oldPen);
     DeleteObject(grid);
@@ -911,10 +933,10 @@ static void PaintChart(HDC dc, int x, int y, int w, int h) {
     drawLine(C_AMBER, 1, comNow);
     drawLine(C_GREEN, 0, ramNow);
 
-    int lx = x + w - 288;
-    TextAt(dc, lx, y + 2, C_GREEN, Fmt(L"● 内存 %.0f%%", ramNow));
-    TextAt(dc, lx + 94, y + 2, C_AMBER, Fmt(L"● 提交 %.0f%%", comNow));
-    TextAt(dc, lx + 188, y + 2, C_BLUE, Fmt(L"● 显存 %.0f%%", gpuNow));
+    int lx = x + w - S(288);
+    TextAt(dc, lx, y + S(2), C_GREEN, Fmt(L"● 内存 %.0f%%", ramNow));
+    TextAt(dc, lx + S(94), y + S(2), C_AMBER, Fmt(L"● 提交 %.0f%%", comNow));
+    TextAt(dc, lx + S(188), y + S(2), C_BLUE, Fmt(L"● 显存 %.0f%%", gpuNow));
 }
 
 // 风扇转速相对温度的滞后（秒）：在 0~30 秒里找相关系数最高的位移
@@ -954,16 +976,16 @@ static void PaintCoolChart(HDC dc, int x, int y, int w, int h) {
     if (g_theme.glass) FillAlpha(dc, x, y, w, h, RGB(255, 255, 255), 110);
     SetBkMode(dc, TRANSPARENT);
 
-    const int leftW = 42, rightW = 40;
+    const int leftW = S(42), rightW = S(40);
     const int plotX = x + leftW, plotW = w - leftW - rightW;
-    const int plotY = y + 18, plotH = h - 18 - 6;
+    const int plotY = y + S(18), plotH = h - S(18) - S(6);
 
     if (g_histCount < 2) {
-        TextAt(dc, x + 70, y + h / 2 - 8, C_DIM, L"采样中…");
+        TextAt(dc, x + S(70), y + h / 2 - S(8), C_DIM, L"采样中…");
         return;
     }
     if (g_temps.gpu <= 0) {
-        TextAt(dc, x + 70, y + h / 2 - 8, C_DIM, L"没有 GPU 温度，画不了散热曲线");
+        TextAt(dc, x + S(70), y + h / 2 - S(8), C_DIM, L"没有 GPU 温度，画不了散热曲线");
         return;
     }
 
@@ -976,7 +998,7 @@ static void PaintCoolChart(HDC dc, int x, int y, int w, int h) {
         tmin = std::min(tmin, sm.gpuT); tmax = std::max(tmax, sm.gpuT);
     }
     if (fmax <= 0 && tmax <= 0) {
-        TextAt(dc, x + 70, y + h / 2 - 8, C_DIM, L"还没有读到转速/温度");
+        TextAt(dc, x + S(70), y + h / 2 - S(8), C_DIM, L"还没有读到转速/温度");
         return;
     }
 
@@ -996,24 +1018,24 @@ static void PaintCoolChart(HDC dc, int x, int y, int w, int h) {
 
     auto yFan = [&](double v) {
         v = std::max(fmin, std::min(fmax, v));
-        return plotY + plotH - 2 - (int)((v - fmin) / (fmax - fmin) * (plotH - 6));
+        return plotY + plotH - S(2) - (int)((v - fmin) / (fmax - fmin) * (plotH - S(6)));
     };
     auto yTemp = [&](double v) {
         v = std::max(tmin, std::min(tmax, v));
-        return plotY + plotH - 2 - (int)((v - tmin) / (tmax - tmin) * (plotH - 6));
+        return plotY + plotH - S(2) - (int)((v - tmin) / (tmax - tmin) * (plotH - S(6)));
     };
 
     HPEN grid = CreatePen(PS_DOT, 1, C_GRID);
     HPEN oldPen = (HPEN)SelectObject(dc, grid);
     for (int i = 0; i <= 4; ++i) {
-        int gy = plotY + (plotH - 6) * i / 4;
+        int gy = plotY + (plotH - S(6)) * i / 4;
         MoveToEx(dc, plotX, gy, nullptr);
         LineTo(dc, plotX + plotW, gy);
         double fv = fmax - (fmax - fmin) * i / 4;
         double tv = tmax - (tmax - tmin) * i / 4;
         if (i > 0) {
-            TextAt(dc, x + 2, gy - 7, C_DIM, Fmt(L"%.0f%%", fv));
-            TextAt(dc, plotX + plotW + 6, gy - 7, C_DIM, Fmt(L"%.0f°C", tv));
+            TextAt(dc, x + S(2), gy - S(7), C_DIM, Fmt(L"%.0f%%", fv));
+            TextAt(dc, plotX + plotW + S(6), gy - S(7), C_DIM, Fmt(L"%.0f°C", tv));
         }
     }
     SelectObject(dc, oldPen);
@@ -1043,21 +1065,21 @@ static void PaintCoolChart(HDC dc, int x, int y, int w, int h) {
     drawLine(C_BLUE, true, fanNow);
     drawLine(C_RED, false, tempNow);
 
-    TextAt(dc, x + 6, y + 1, C_BLUE, Fmt(L"● 转速 %.0f%%", fanNow));
-    TextAt(dc, x + 112, y + 1, C_RED, Fmt(L"● 温度 %.0f°C", tempNow));
+    TextAt(dc, x + S(6), y + S(1), C_BLUE, Fmt(L"● 转速 %.0f%%", fanNow));
+    TextAt(dc, x + S(112), y + S(1), C_RED, Fmt(L"● 温度 %.0f°C", tempNow));
 
     double lag = FanLagSeconds();
     if (lag >= 0)
-        TextAt(dc, x + w - 96, y + 1, lag < 2 ? C_MUTED : C_AMBER,
+        TextAt(dc, x + w - S(96), y + S(1), lag < 2 ? C_MUTED : C_AMBER,
                lag < 2 ? L"两者同步" : Fmt(L"滞后 %.0f 秒", lag));
     else if (lag == -2)
-        TextAt(dc, x + w - 96, y + 1, C_DIM, L"暂无可比");
+        TextAt(dc, x + w - S(96), y + S(1), C_DIM, L"暂无可比");
 }
 
 static void PaintCooling(HDC dc, int x, int y, int w) {
     SetBkMode(dc, TRANSPARENT);
     if (g_temps.gpu <= 0) {
-        TextAt(dc, x, y + 2, C_DIM, L"散热：没读到 GPU 温度（nvidia-smi 不可用），风扇转速无从对比");
+        TextAt(dc, x, y + S(2), C_DIM, L"散热：没读到 GPU 温度（nvidia-smi 不可用），风扇转速无从对比");
         return;
     }
 
@@ -1071,32 +1093,32 @@ static void PaintCooling(HDC dc, int x, int y, int w) {
     const double tNow = g_temps.gpu;
     const double tOld = hasOld ? at(10).gpuT : -1;
 
-    TextAt(dc, x, y + 11, C_MUTED, L"散热");
+    TextAt(dc, x, y + S(11), C_MUTED, L"散热");
 
-    const int lx = x + 52, barX = lx + 74, barW = 170, barH = 9, pitch = 22;
+    const int lx = x + S(52), barX = lx + S(74), barW = S(170), barH = S(9), pitch = S(22);
 
     // 两条同宽的条：一眼看出「转速拉到多少 / 温度压到多少」
     COLORREF fanColor = fanNow >= 90 ? C_RED : (fanNow >= 70 ? C_AMBER : C_BLUE);
     COLORREF tColor = tNow >= 83 ? C_RED : (tNow >= 70 ? C_AMBER : C_GREEN);
 
-    TextAt(dc, lx, y + 4, C_MUTED, L"风扇");
-    DrawBar(dc, barX, y + 5, barW, barH, fanNow, fanColor);
-    TextAt(dc, barX + barW + 12, y + 2, C_TEXT, Fmt(L"%.0f%%", fanNow));
+    TextAt(dc, lx, y + S(4), C_MUTED, L"风扇");
+    DrawBar(dc, barX, y + S(5), barW, barH, fanNow, fanColor);
+    TextAt(dc, barX + barW + S(12), y + S(2), C_TEXT, Fmt(L"%.0f%%", fanNow));
     if (hasOld && fanOld >= 0) {
         double d = fanNow - fanOld;
-        TextAt(dc, barX + barW + 68, y + 2, C_DIM,
+        TextAt(dc, barX + barW + S(68), y + S(2), C_DIM,
                std::fabs(d) < 1 ? std::wstring(L"20 秒前持平")
                                 : Fmt(L"20 秒前 %.0f%%（%s%.0f%%）", fanOld,
                                       d > 0 ? L"+" : L"-", std::fabs(d)));
     }
 
-    TextAt(dc, lx, y + 2 + pitch, C_MUTED, L"GPU 温度");
+    TextAt(dc, lx, y + S(2) + pitch, C_MUTED, L"GPU 温度");
     double tPct = (tNow - 20) / 75 * 100;           // 20~95°C 映射到整条
-    DrawBar(dc, barX, y + 3 + pitch, barW, barH, tPct, tColor);
-    TextAt(dc, barX + barW + 12, y + pitch, C_TEXT, Fmt(L"%.0f°C", tNow));
+    DrawBar(dc, barX, y + S(3) + pitch, barW, barH, tPct, tColor);
+    TextAt(dc, barX + barW + S(12), y + pitch, C_TEXT, Fmt(L"%.0f°C", tNow));
     if (hasOld && tOld > 0) {
         double d = tNow - tOld;
-        TextAt(dc, barX + barW + 68, y + pitch, C_DIM,
+        TextAt(dc, barX + barW + S(68), y + pitch, C_DIM,
                std::fabs(d) < 1 ? std::wstring(L"20 秒前持平")
                                 : Fmt(L"20 秒前 %.0f°C（%s%.0f°C）", tOld,
                                       d > 0 ? L"+" : L"-", std::fabs(d)));
@@ -1109,11 +1131,11 @@ static void PaintCooling(HDC dc, int x, int y, int w) {
     else if (tNow >= 83)            { verdict = L"温度偏高，风扇没拉满：查风扇曲线"; vColor = C_AMBER; }
     else if (fanNow >= 90 && tNow < 60) { verdict = L"转速高但温度低：散热余量充足"; vColor = C_BLUE; }
     else if (tNow < 60 && fanNow < 40)  { verdict = L"低转速低温度：散热轻松"; vColor = C_GREEN; }
-    if (verdict[0]) TextAt(dc, x + w - 300, y + 13, vColor, verdict);
+    if (verdict[0]) TextAt(dc, x + w - S(300), y + S(13), vColor, verdict);
 }
 
 static void PaintHeader(HDC dc, int w, int h) {
-    HFONT font = CreateFontW(14, 0, 0, 0, FW_NORMAL, 0, 0, 0, DEFAULT_CHARSET,
+    HFONT font = CreateFontW(S(14), 0, 0, 0, FW_NORMAL, 0, 0, 0, DEFAULT_CHARSET,
                              OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS, CLEARTYPE_QUALITY,
                              DEFAULT_PITCH, L"Microsoft YaHei UI");
     HGDIOBJ old = SelectObject(dc, font);
@@ -1121,7 +1143,7 @@ static void PaintHeader(HDC dc, int w, int h) {
 
     if (g_theme.glass) {
         GlossBand(dc, w);
-        GlassPanel(dc, 14, 52, w - 28, h - 58, 10);
+        GlassPanel(dc, S(14), S(52), w - S(28), h - S(58), S(10));
     }
     else {
         HBRUSH bg = CreateSolidBrush(C_BG);
@@ -1136,32 +1158,32 @@ static void PaintHeader(HDC dc, int w, int h) {
     double vpct = s.vramTotal > 0 ? s.vramUsed / s.vramTotal * 100 : 0;
     COLORREF vColor = vpct >= 92 ? C_RED : C_AMBER;
 
-    PaintStat(dc, 30, 64, L"内存", Fmt(L"%.1f / %.1f GB (%.0f%%)", s.ramUsedGB, s.ramTotalGB, s.ramPct),
+    PaintStat(dc, S(30), S(64), L"内存", Fmt(L"%.1f / %.1f GB (%.0f%%)", s.ramUsedGB, s.ramTotalGB, s.ramPct),
               s.ramPct, ramColor);
-    PaintStat(dc, 30, 104, L"提交", Fmt(L"%.1f / %.1f GB (%.0f%%)", s.comUsedGB, s.comTotalGB, s.comPct),
+    PaintStat(dc, S(30), S(104), L"提交", Fmt(L"%.1f / %.1f GB (%.0f%%)", s.comUsedGB, s.comTotalGB, s.comPct),
               s.comPct, comColor);
-    PaintStat(dc, 282, 64, L"显存", s.hasGpu ? Fmt(L"%.1f / %.1f GB", s.vramUsed, s.vramTotal) : L"无 N 卡",
+    PaintStat(dc, S(282), S(64), L"显存", s.hasGpu ? Fmt(L"%.1f / %.1f GB", s.vramUsed, s.vramTotal) : L"无 N 卡",
               vpct, vColor);
-    PaintStat(dc, 282, 104, L"GPU", s.hasGpu ? Fmt(L"%.0f%%  %.0f°C", s.gpuUtil, s.gpuTemp) : L"—",
+    PaintStat(dc, S(282), S(104), L"GPU", s.hasGpu ? Fmt(L"%.0f%%  %.0f°C", s.gpuUtil, s.gpuTemp) : L"—",
               s.gpuUtil, C_BLUE);
 
-    TextAt(dc, 532, 66, C_MUTED, Fmt(L"CPU %.0f%%    %d 个进程", s.cpuPct, s.procCount));
-    TextAt(dc, 532, 94, C_MUTED, L"模型占用");
+    TextAt(dc, S(532), S(66), C_MUTED, Fmt(L"CPU %.0f%%    %d 个进程", s.cpuPct, s.procCount));
+    TextAt(dc, S(532), S(94), C_MUTED, L"模型占用");
     if (s.modelRunning)
-        TextAt(dc, 532, 112, C_TEXT,
+        TextAt(dc, S(532), S(112), C_TEXT,
                Fmt(L"显存 %.1f GB · 内存 %.2f GB · 权重 %.1f GB", s.vramUsed, s.modelMemGB, g_weightsGB));
     else
-        TextAt(dc, 532, 112, C_DIM, Fmt(L"未运行（权重 %.1f GB）", g_weightsGB));
+        TextAt(dc, S(532), S(112), C_DIM, Fmt(L"未运行（权重 %.1f GB）", g_weightsGB));
 
-    const int gap = 14;
-    const int halfW = (w - 48 - gap) / 2;
-    PaintChart(dc, 24, 136, halfW, 90);
-    PaintCoolChart(dc, 24 + halfW + gap, 136, halfW, 90);
+    const int gap = S(14);
+    const int halfW = (w - S(48) - gap) / 2;
+    PaintChart(dc, S(24), S(136), halfW, S(90));
+    PaintCoolChart(dc, S(24) + halfW + gap, S(136), halfW, S(90));
 
-    TextAt(dc, 28, 232, C_DIM, Fmt(L"最近 %.0f 秒", g_histCount * 2.0));
-    TextAt(dc, w - 60, 232, C_DIM, L"现在");
-    TextAt(dc, 24, 248, C_MUTED, Fmt(L"趋势：%s", TrendText().c_str()));
-    PaintCooling(dc, 24, 272, w - 48);
+    TextAt(dc, S(28), S(232), C_DIM, Fmt(L"最近 %.0f 秒", g_histCount * 2.0));
+    TextAt(dc, w - S(60), S(232), C_DIM, L"现在");
+    TextAt(dc, S(24), S(248), C_MUTED, Fmt(L"趋势：%s", TrendText().c_str()));
+    PaintCooling(dc, S(24), S(272), w - S(48));
 
     SelectObject(dc, old);
     DeleteObject(font);
@@ -1378,7 +1400,7 @@ static CleanResult CleanMemory() {
 }
 
 // ------------------------------------------------------------------ 悬浮球
-#define BALL_SIZE 68
+#define BALL_SIZE S(68)
 static bool g_ballDrag = false;
 static bool g_ballMoved = false;
 static POINT g_dragOrigin{}, g_winOrigin{};
@@ -1403,13 +1425,13 @@ static void PaintBall(HDC dc) {
     HPEN noPen = CreatePen(PS_NULL, 0, RGB(0, 0, 0));
     HGDIOBJ oldBr = SelectObject(dc, fill);
     HGDIOBJ oldPen = SelectObject(dc, noPen);
-    Ellipse(dc, 2, 2, BALL_SIZE - 2, BALL_SIZE - 2);
+    Ellipse(dc, S(2), S(2), BALL_SIZE - S(2), BALL_SIZE - S(2));
 
     // 进度弧
-    HPEN arcPen = CreatePen(PS_SOLID, 5, col);
+    HPEN arcPen = CreatePen(PS_SOLID, S(5), col);
     SelectObject(dc, arcPen);
     SelectObject(dc, GetStockObject(NULL_BRUSH));
-    int inset = 7;
+    int inset = S(7);
     Arc(dc, inset, inset, BALL_SIZE - inset, BALL_SIZE - inset,
         0, -(int)(360 * pct / 100.0), 0, -(int)(360 * pct / 100.0) - 1);
 
@@ -1420,7 +1442,7 @@ static void PaintBall(HDC dc) {
     DeleteObject(arcPen);
 
     // 百分比
-    HFONT f = CreateFontW(17, 0, 0, 0, FW_BOLD, 0, 0, 0, DEFAULT_CHARSET,
+    HFONT f = CreateFontW(S(17), 0, 0, 0, FW_BOLD, 0, 0, 0, DEFAULT_CHARSET,
                           OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS, CLEARTYPE_QUALITY,
                           DEFAULT_PITCH, L"Microsoft YaHei UI");
     HGDIOBJ oldF = SelectObject(dc, f);
@@ -1652,6 +1674,8 @@ static void ApplyMode(HWND hwnd, int mode) {
         ListView_SetBkColor(g_list, g_theme.listBg);
         ListView_SetTextBkColor(g_list, g_theme.listBg);
         ListView_SetTextColor(g_list, C_TEXT);
+        InvalidateRect(ListView_GetHeader(g_list), nullptr, TRUE);
+        InvalidateRect(g_list, nullptr, FALSE);
     }
     if (g_theme.glass) EnableDwmGlass(hwnd);
     ApplyCaptionTheme(hwnd);
@@ -1672,15 +1696,147 @@ static void ApplyMode(HWND hwnd, int mode) {
     RedrawWindow(hwnd, nullptr, nullptr, RDW_INVALIDATE | RDW_ALLCHILDREN | RDW_FRAME);
 }
 
+// 列宽也要跟着 DPI 走，否则换到高分屏后列会挤成一条
+static void ApplyListColumns() {
+    if (!g_list) return;
+    const int w[5] = { S(230), S(50), S(85), S(70), S(62) };
+    for (int i = 0; i < 5; ++i) ListView_SetColumnWidth(g_list, i, w[i]);
+}
+
+// 行悬停：只在换了行的时候重画那两行，避免整表闪
+static LRESULT CALLBACK ListProc(HWND h, UINT m, WPARAM w, LPARAM l, UINT_PTR, DWORD_PTR) {
+    switch (m) {
+    case WM_MOUSEMOVE: {
+        TRACKMOUSEEVENT tme{ sizeof(tme) };
+        tme.dwFlags = TME_LEAVE;
+        tme.hwndTrack = h;
+        TrackMouseEvent(&tme);
+
+        LVHITTESTINFO ht{};
+        ht.pt.x = (short)LOWORD(l);
+        ht.pt.y = (short)HIWORD(l);
+        int row = ListView_HitTest(h, &ht);
+        if (row != g_hoverRow) {
+            auto repaint = [&](int r) {
+                if (r < 0) return;
+                RECT rc{};
+                if (ListView_GetItemRect(h, r, &rc, LVIR_BOUNDS))
+                    InvalidateRect(h, &rc, FALSE);
+            };
+            repaint(g_hoverRow);
+            g_hoverRow = row;
+            repaint(g_hoverRow);
+        }
+        break;
+    }
+    case WM_MOUSELEAVE:
+        g_hoverRow = -1;
+        InvalidateRect(h, nullptr, FALSE);
+        break;
+    }
+    return DefSubclassProc(h, m, w, l);
+}
+
+// 表头自绘：系统表头是灰色渐变 + 居中，和玻璃卡片不是一套语言
+static LRESULT OnHeaderDraw(NMCUSTOMDRAW* cd) {
+    switch (cd->dwDrawStage) {
+    case CDDS_PREPAINT: {
+        RECT rc{};
+        GetClientRect(cd->hdr.hwndFrom, &rc);
+        HBRUSH b = CreateSolidBrush(g_theme.listHead);
+        FillRect(cd->hdc, &rc, b);
+        DeleteObject(b);
+        return CDRF_NOTIFYITEMDRAW;
+    }
+    case CDDS_ITEMPREPAINT: {
+        RECT rc = cd->rc;
+        HBRUSH b = CreateSolidBrush(g_theme.listHead);
+        FillRect(cd->hdc, &rc, b);
+        DeleteObject(b);
+
+        RECT line{ rc.right - S(1), rc.top + S(8), rc.right, rc.bottom - S(8) };
+        HBRUSH lb = CreateSolidBrush(g_theme.listLine);
+        FillRect(cd->hdc, &line, lb);
+        DeleteObject(lb);
+
+        wchar_t text[128]{};
+        HDITEMW hi{};
+        hi.mask = HDI_TEXT;
+        hi.pszText = text;
+        hi.cchTextMax = 128;
+        Header_GetItem(cd->hdr.hwndFrom, (int)cd->dwItemSpec, &hi);
+
+        HFONT f = CreateFontW(S(13), 0, 0, 0, FW_SEMIBOLD, 0, 0, 0, DEFAULT_CHARSET,
+                              OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS, CLEARTYPE_QUALITY,
+                              DEFAULT_PITCH, L"Microsoft YaHei UI");
+        HGDIOBJ of = SelectObject(cd->hdc, f);
+        int oldMode = SetBkMode(cd->hdc, TRANSPARENT);
+        COLORREF oldColor = SetTextColor(cd->hdc, C_MUTED);
+
+        RECT tr = rc;
+        tr.left += S(10);
+        DrawTextW(cd->hdc, text, -1, &tr, DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS);
+
+        SetTextColor(cd->hdc, oldColor);
+        SetBkMode(cd->hdc, oldMode);
+        SelectObject(cd->hdc, of);
+        DeleteObject(f);
+
+        RECT bottom{ rc.left, rc.bottom - S(1), rc.right, rc.bottom };
+        HBRUSH bb = CreateSolidBrush(g_theme.listLine);
+        FillRect(cd->hdc, &bottom, bb);
+        DeleteObject(bb);
+        return CDRF_SKIPDEFAULT;
+    }
+    }
+    return CDRF_DODEFAULT;
+}
+
+// 控件字体不会自己跟着 per-monitor DPI 走，得手工按缩放重建
+static HFONT g_uiFont = nullptr, g_chatTextFont = nullptr;
+
+static void ApplyControlFonts(HWND hwnd) {
+    HFONT ui = CreateFontW(S(14), 0, 0, 0, FW_NORMAL, 0, 0, 0, DEFAULT_CHARSET,
+                           OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS, CLEARTYPE_QUALITY,
+                           DEFAULT_PITCH, L"Microsoft YaHei UI");
+    HFONT chat = CreateFontW(S(15), 0, 0, 0, FW_NORMAL, 0, 0, 0, DEFAULT_CHARSET,
+                             OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS, CLEARTYPE_QUALITY,
+                             DEFAULT_PITCH, L"Microsoft YaHei UI");
+
+    HWND ctrls[] = { g_list, g_input, g_status };
+    for (HWND c : ctrls)
+        if (c) SendMessageW(c, WM_SETFONT, (WPARAM)ui, TRUE);
+    if (g_chat) SendMessageW(g_chat, WM_SETFONT, (WPARAM)chat, TRUE);
+
+    const int ids[] = { ID_BTN_WHY, ID_BTN_MEM, ID_BTN_KILL, ID_BTN_CLEAN,
+                        ID_BTN_ASK, ID_BTN_REFRESH, ID_BTN_COPY, ID_BTN_THEME };
+    for (int id : ids)
+        if (HWND b = GetDlgItem(hwnd, id)) SendMessageW(b, WM_SETFONT, (WPARAM)ui, TRUE);
+
+    if (g_uiFont) DeleteObject(g_uiFont);
+    if (g_chatTextFont) DeleteObject(g_chatTextFont);
+    g_uiFont = ui;
+    g_chatTextFont = chat;
+}
+
 static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
     switch (msg) {
     case WM_CREATE: {
         HINSTANCE hInst = (HINSTANCE)GetWindowLongPtrW(hwnd, GWLP_HINSTANCE);
 
-        g_list = CreateWindowExW(WS_EX_CLIENTEDGE, WC_LISTVIEWW, L"",
+        // 先拿到这台显示器真实的 DPI，后面的 S() 才有意义
+        if (!g_dpiForced) {
+            using GetDpiFn = UINT(WINAPI*)(HWND);
+            auto pGetDpi = (GetDpiFn)GetProcAddress(GetModuleHandleW(L"user32.dll"), "GetDpiForWindow");
+            UINT d = pGetDpi ? pGetDpi(hwnd) : 0;
+            if (d >= 96) g_dpi = (int)d;
+        }
+
+        g_list = CreateWindowExW(0, WC_LISTVIEWW, L"",
                                  WS_CHILD | WS_VISIBLE | LVS_REPORT | LVS_SINGLESEL | LVS_SHOWSELALWAYS,
-                                 18, HEADER_H + 10, 600, 400, hwnd, (HMENU)ID_LIST, hInst, nullptr);
+                                 S(18), HEADER_H + S(10), S(600), S(400), hwnd, (HMENU)ID_LIST, hInst, nullptr);
         ListView_SetExtendedListViewStyle(g_list, LVS_EX_FULLROWSELECT | LVS_EX_DOUBLEBUFFER);
+        SetWindowSubclass(g_list, ListProc, 1, 0);
         ListView_SetBkColor(g_list, g_theme.listBg);
         ListView_SetTextBkColor(g_list, g_theme.listBg);
         ListView_SetTextColor(g_list, C_TEXT);
@@ -1692,7 +1848,7 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
             LVCOLUMNW c{};
             c.mask = LVCF_TEXT | LVCF_WIDTH | LVCF_SUBITEM;
             c.pszText = (LPWSTR)cols[i].t;
-            c.cx = cols[i].w;
+            c.cx = S(cols[i].w);
             c.iSubItem = i;
             ListView_InsertColumn(g_list, i, &c);
         }
@@ -1700,20 +1856,20 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
         g_chat = CreateWindowExW(WS_EX_CLIENTEDGE, L"EDIT", L"",
                                  WS_CHILD | WS_VISIBLE | ES_MULTILINE | ES_READONLY |
                                  WS_VSCROLL | ES_AUTOVSCROLL,
-                                 630, HEADER_H + 10, 350, 300, hwnd, (HMENU)ID_CHAT, hInst, nullptr);
+                                 S(630), HEADER_H + S(10), S(350), S(300), hwnd, (HMENU)ID_CHAT, hInst, nullptr);
         g_input = CreateWindowExW(WS_EX_CLIENTEDGE, L"EDIT", L"",
                                   WS_CHILD | WS_VISIBLE | ES_AUTOHSCROLL,
-                                  630, 500, 270, 28, hwnd, (HMENU)ID_INPUT, hInst, nullptr);
+                                  S(630), S(500), S(270), S(28), hwnd, (HMENU)ID_INPUT, hInst, nullptr);
 
         struct { int id; const wchar_t* t; int x; int y; int w; int h; } btns[] = {
-            { ID_BTN_WHY,     L"为什么卡", 630, 538, 88, 30 },
-            { ID_BTN_MEM,     L"谁吃内存", 722, 538, 88, 30 },
-            { ID_BTN_KILL,    L"结束选中", 814, 538, 88, 30 },
-            { ID_BTN_CLEAN,   L"执行建议", 906, 538, 88, 30 },
-            { ID_BTN_ASK,     L"提问",     906, 500, 88, 28 },
-            { ID_BTN_REFRESH, L"刷新",     630, 574, 88, 30 },
-            { ID_BTN_COPY,    L"复制快照", 722, 574, 88, 30 },
-            { ID_BTN_THEME,   L"换主题",   814, 574, 88, 30 },
+            { ID_BTN_WHY,     L"为什么卡", S(630), S(538), S(88), S(30) },
+            { ID_BTN_MEM,     L"谁吃内存", S(722), S(538), S(88), S(30) },
+            { ID_BTN_KILL,    L"结束选中", S(814), S(538), S(88), S(30) },
+            { ID_BTN_CLEAN,   L"执行建议", S(906), S(538), S(88), S(30) },
+            { ID_BTN_ASK,     L"提问",     S(906), S(500), S(88), S(28) },
+            { ID_BTN_REFRESH, L"刷新",     S(630), S(574), S(88), S(30) },
+            { ID_BTN_COPY,    L"复制快照", S(722), S(574), S(88), S(30) },
+            { ID_BTN_THEME,   L"换主题",   S(814), S(574), S(88), S(30) },
         };
         for (auto& b : btns)
             CreateWindowExW(0, L"BUTTON", b.t, WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON,
@@ -1723,13 +1879,11 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
         SetWindowTextW(GetDlgItem(hwnd, ID_BTN_THEME), ModeName((g_mode + 1) % 3));
 
         g_status = CreateWindowExW(0, L"STATIC", L"正在采样…", WS_CHILD | WS_VISIBLE,
-                                   18, 600, 960, 20, hwnd, (HMENU)ID_STATUS, hInst, nullptr);
+                                   S(18), S(600), S(960), S(20), hwnd, (HMENU)ID_STATUS, hInst, nullptr);
 
-        HFONT chatFont = CreateFontW(15, 0, 0, 0, FW_NORMAL, 0, 0, 0, DEFAULT_CHARSET,
-                                     OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS, CLEARTYPE_QUALITY,
-                                     DEFAULT_PITCH, L"Microsoft YaHei UI");
-        SendMessageW(g_chat, WM_SETFONT, (WPARAM)chatFont, TRUE);
-        SendMessageW(g_chat, EM_SETMARGINS, EC_LEFTMARGIN | EC_RIGHTMARGIN, MAKELPARAM(8, 8));
+        ApplyControlFonts(hwnd);
+        SendMessageW(g_chat, EM_SETMARGINS, EC_LEFTMARGIN | EC_RIGHTMARGIN,
+                     MAKELPARAM(S(8), S(8)));
 
         AppendChat(L"我是这台机器的资源分析器，可以直接问我：");
         AppendChat(L"· 为什么卡？   · 谁在吃内存？");
@@ -1792,7 +1946,7 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
         if (g_theme.glass && rc.bottom > HEADER_H) {
             // 整窗：天蓝渐变 + 顶部更亮
             VGradient(mem, 0, 0, rc.right, rc.bottom, g_theme.bg1, g_theme.bg2, 255, 255);
-            VGradient(mem, 0, 0, rc.right, 120, RGB(255, 255, 255), RGB(255, 255, 255), 120, 0);
+            VGradient(mem, 0, 0, rc.right, S(120), RGB(255, 255, 255), RGB(255, 255, 255), 120, 0);
         } else {
             HBRUSH bg = CreateSolidBrush(C_BG);
             RECT all{ 0, 0, rc.right, rc.bottom };
@@ -1925,54 +2079,79 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
     }
     case WM_GETMINMAXINFO: {
         MINMAXINFO* mm = (MINMAXINFO*)lp;
-        mm->ptMinTrackSize = POINT{ 1000, 700 };
+        RECT work{};
+        SystemParametersInfoW(SPI_GETWORKAREA, 0, &work, 0);
+        int workW = work.right - work.left, workH = work.bottom - work.top;
+        mm->ptMinTrackSize = POINT{ std::min(S(1000), workW > 0 ? workW : S(1000)),
+                                    std::min(S(700),  workH > 0 ? workH : S(700)) };
+        return 0;
+    }
+    case WM_DPICHANGED: {
+        if (!g_dpiForced) {
+            g_dpi = HIWORD(wp);
+            RECT* want = (RECT*)lp;
+            SetWindowPos(hwnd, nullptr, want->left, want->top,
+                         want->right - want->left, want->bottom - want->top,
+                         SWP_NOZORDER | SWP_NOACTIVATE);
+            ApplyControlFonts(hwnd);
+            ApplyListColumns();
+            SendMessageW(hwnd, WM_SIZE, 0, 0);
+            InvalidateRect(hwnd, nullptr, TRUE);
+        }
         return 0;
     }
     case WM_SIZE: {
         RECT rc;
         GetClientRect(hwnd, &rc);
         int w = rc.right, h = rc.bottom;
-        int listW = w - 470;
-        if (g_list) MoveWindow(g_list, 18, HEADER_H + 10, listW, h - HEADER_H - 80, TRUE);
-        if (g_chat) MoveWindow(g_chat, w - 368, HEADER_H + 10, 350, h - HEADER_H - 160, TRUE);
-        if (g_input) MoveWindow(g_input, w - 368, h - 138, 270, 28, TRUE);
+        int listW = w - S(470);
+        if (g_list) MoveWindow(g_list, S(18), HEADER_H + S(10), listW, h - HEADER_H - S(80), TRUE);
+        if (g_chat) MoveWindow(g_chat, w - S(368), HEADER_H + S(10), S(350), h - HEADER_H - S(160), TRUE);
+        if (g_input) MoveWindow(g_input, w - S(368), h - S(138), S(270), S(28), TRUE);
 
-        int bx = w - 368;
-        int by = h - 100;
+        int bx = w - S(368);
+        int by = h - S(100);
         const int row1[4] = { ID_BTN_WHY, ID_BTN_MEM, ID_BTN_KILL, ID_BTN_CLEAN };
         for (int i = 0; i < 4; ++i) {
             HWND c = GetDlgItem(hwnd, row1[i]);
-            if (c) MoveWindow(c, bx + i * 92, by, 88, 30, TRUE);
+            if (c) MoveWindow(c, bx + i * S(92), by, S(88), S(30), TRUE);
         }
         HWND ask = GetDlgItem(hwnd, ID_BTN_ASK);
-        if (ask) MoveWindow(ask, bx + 276, h - 138, 88, 28, TRUE);
+        if (ask) MoveWindow(ask, bx + S(276), h - S(138), S(88), S(28), TRUE);
 
         const int row2[3] = { ID_BTN_REFRESH, ID_BTN_COPY, ID_BTN_THEME };
         for (int i = 0; i < 3; ++i) {
             HWND c = GetDlgItem(hwnd, row2[i]);
-            if (c) MoveWindow(c, bx + i * 92, by + 36, 88, 30, TRUE);
+            if (c) MoveWindow(c, bx + i * S(92), by + S(36), S(88), S(30), TRUE);
         }
-        if (g_status) MoveWindow(g_status, 18, h - 34, w - 40, 20, TRUE);
+        if (g_status) MoveWindow(g_status, S(18), h - S(34), w - S(40), S(20), TRUE);
 
         InvalidateRect(hwnd, nullptr, FALSE);
         return 0;
     }
     case WM_NOTIFY: {
         auto* nh = (LPNMHDR)lp;
-        if (nh->idFrom == ID_LIST && nh->code == NM_CUSTOMDRAW) {
-            auto* cd = (LPNMLVCUSTOMDRAW)lp;
-            switch (cd->nmcd.dwDrawStage) {
-            case CDDS_PREPAINT:
-                return CDRF_NOTIFYITEMDRAW;
-            case CDDS_ITEMPREPAINT: {
-                int row = (int)cd->nmcd.dwItemSpec;
-                BOOL sel = ListView_GetItemState(g_list, row, LVIS_SELECTED) == LVIS_SELECTED;
-                cd->clrTextBk = sel ? g_theme.listSel : (row % 2 ? g_theme.listAlt : g_theme.listBg);
-                cd->clrText = C_TEXT;
-                return CDRF_NEWFONT;
-            }
-            default:
-                return CDRF_DODEFAULT;
+        if (nh->code == NM_CUSTOMDRAW) {
+            if (g_list && nh->hwndFrom == ListView_GetHeader(g_list))
+                return OnHeaderDraw((LPNMCUSTOMDRAW)lp);
+
+            if (nh->idFrom == ID_LIST) {
+                auto* cd = (LPNMLVCUSTOMDRAW)lp;
+                switch (cd->nmcd.dwDrawStage) {
+                case CDDS_PREPAINT:
+                    return CDRF_NOTIFYITEMDRAW;
+                case CDDS_ITEMPREPAINT: {
+                    int row = (int)cd->nmcd.dwItemSpec;
+                    BOOL sel = ListView_GetItemState(g_list, row, LVIS_SELECTED) == LVIS_SELECTED;
+                    if (sel)                    cd->clrTextBk = g_theme.listSel;
+                    else if (row == g_hoverRow) cd->clrTextBk = g_theme.listHover;
+                    else                        cd->clrTextBk = (row % 2) ? g_theme.listAlt : g_theme.listBg;
+                    cd->clrText = C_TEXT;
+                    return CDRF_NEWFONT;
+                }
+                default:
+                    return CDRF_DODEFAULT;
+                }
             }
         }
         return 0;
@@ -2060,6 +2239,19 @@ int WINAPI wWinMain(HINSTANCE hInst, HINSTANCE, LPWSTR lpCmdLine, int) {
     InitCommonControls();
     g_weightsGB = WeightsGB();
 
+    HDC screenDC = GetDC(nullptr);
+    g_dpi = GetDeviceCaps(screenDC, LOGPIXELSX);
+    ReleaseDC(nullptr, screenDC);
+    g_dpiForced = InitDpiFromEnvironment();
+    if (!g_dpiForced) {
+        using GetDpiForSystemFn = UINT(WINAPI*)();
+        auto pDpi = (GetDpiForSystemFn)GetProcAddress(GetModuleHandleW(L"user32.dll"), "GetDpiForSystem");
+        if (pDpi) {
+            UINT d = pDpi();
+            if (d >= 96) g_dpi = (int)d;
+        }
+    }
+
     WNDCLASSEXW wc{};
     wc.cbSize = sizeof(wc);
     wc.style = CS_HREDRAW | CS_VREDRAW;
@@ -2074,9 +2266,15 @@ int WINAPI wWinMain(HINSTANCE hInst, HINSTANCE, LPWSTR lpCmdLine, int) {
     wc.lpszClassName = L"AITaskManagerWnd";
     RegisterClassExW(&wc);
 
-    int w = 1000, h = 820;
-    int x = (GetSystemMetrics(SM_CXSCREEN) - w) / 2;
-    int y = std::max(0, (GetSystemMetrics(SM_CYSCREEN) - h) / 2);
+    // 高 DPI 下 1000x820 会超出屏幕，按工作区裁一下
+    RECT work{};
+    SystemParametersInfoW(SPI_GETWORKAREA, 0, &work, 0);
+    int workW = work.right - work.left, workH = work.bottom - work.top;
+    if (workW <= 0 || workH <= 0) { workW = GetSystemMetrics(SM_CXSCREEN); workH = GetSystemMetrics(SM_CYSCREEN); }
+    int w = std::min(S(1000), workW);
+    int h = std::min(S(820), workH);
+    int x = work.left + (workW - w) / 2;
+    int y = work.top + std::max(0, (workH - h) / 2);
 
     HWND hwnd = CreateWindowExW(0, L"AITaskManagerWnd", APP_TITLE,
                                 WS_OVERLAPPEDWINDOW | WS_CLIPCHILDREN, x, y, w, h,
