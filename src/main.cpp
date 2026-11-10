@@ -1506,7 +1506,31 @@ static void ToastShow(int count, double freedMB) {
     const int padX = S(16), padY = S(12), iconW = S(24), gap = S(10);
     const int textW = (int)std::max(b1.Width, b2.Width) + S(2);
     g_toastW = padX * 2 + iconW + gap + textW;
-    g_toastH = padY * 2 + (int)b1.Height + (int)b2.Height + S(3);
+    const int bodyH = padY * 2 + (int)b1.Height + (int)b2.Height + S(3);
+    const int tailH = S(6), tailHalf = S(10);
+
+    // 先定位置：上方放得下就放上面，否则放下面；尖角始终指向球心
+    RECT br{}, work{};
+    GetWindowRect(g_ball, &br);
+    MONITORINFO mi{ sizeof(mi) };
+    HMONITOR mon = MonitorFromWindow(g_ball, MONITOR_DEFAULTTONEAREST);
+    if (mon && GetMonitorInfoW(mon, &mi)) work = mi.rcWork;
+    else SystemParametersInfoW(SPI_GETWORKAREA, 0, &work, 0);
+
+    g_toastH = bodyH + tailH;
+    const bool tailUp = (br.top - (bodyH + tailH) - S(6)) < ((int)work.top + S(4));
+
+    int bx = br.left + ((br.right - br.left) - g_toastW) / 2;
+    int by = tailUp ? br.bottom + S(6) : br.top - g_toastH - S(6);
+    bx = std::max((int)work.left + S(4), std::min(bx, (int)work.right - g_toastW - S(4)));
+
+    const int bodyTop = tailUp ? tailH : 0;
+
+    // 尖角在气泡里的横坐标：对着球心，再夹在圆角之间，不会顶到边
+    int tipX = (br.left + br.right) / 2 - bx;
+    const int tipMin = S(14) + tailHalf;
+    const int tipMax = g_toastW - S(14) - tailHalf;
+    tipX = std::max(tipMin, std::min(tipX, tipMax));
 
     HDC screen = GetDC(nullptr);
     BITMAPINFO bi{};
@@ -1530,12 +1554,35 @@ static void ToastShow(int count, double freedMB) {
         g.SetTextRenderingHint(Gdiplus::TextRenderingHintAntiAliasGridFit);
 
         const Gdiplus::REAL rr = (Gdiplus::REAL)S(10);
-        const Gdiplus::REAL wR = (Gdiplus::REAL)g_toastW, hR = (Gdiplus::REAL)g_toastH;
+        const Gdiplus::REAL wR = (Gdiplus::REAL)g_toastW;
+        const Gdiplus::REAL top = (Gdiplus::REAL)bodyTop;
+        const Gdiplus::REAL bot = top + (Gdiplus::REAL)bodyH;
+        const Gdiplus::REAL tX = (Gdiplus::REAL)tipX;
+        const Gdiplus::REAL tHalf = (Gdiplus::REAL)tailHalf;
+        const Gdiplus::REAL tH = (Gdiplus::REAL)tailH;
+
+        // 圆角矩形 + 尖角画成同一条路径：填充和描边都不会在接缝处出现一条线
         Gdiplus::GraphicsPath path;
-        path.AddArc(0.5f, 0.5f, rr, rr, 180.0f, 90.0f);
-        path.AddArc(wR - rr - 0.5f, 0.5f, rr, rr, 270.0f, 90.0f);
-        path.AddArc(wR - rr - 0.5f, hR - rr - 0.5f, rr, rr, 0.0f, 90.0f);
-        path.AddArc(0.5f, hR - rr - 0.5f, rr, rr, 90.0f, 90.0f);
+        path.AddArc(0.5f, top + 0.5f, rr, rr, 180.0f, 90.0f);
+        if (tailUp) {
+            path.AddLine(rr, top, tX - tHalf, top);
+            path.AddLine(tX - tHalf, top, tX, top - tH);
+            path.AddLine(tX, top - tH, tX + tHalf, top);
+            path.AddLine(tX + tHalf, top, wR - rr, top);
+        } else {
+            path.AddLine(rr, top, wR - rr, top);
+        }
+        path.AddArc(wR - rr - 0.5f, top + 0.5f, rr, rr, 270.0f, 90.0f);
+        path.AddArc(wR - rr - 0.5f, bot - rr - 0.5f, rr, rr, 0.0f, 90.0f);
+        if (!tailUp) {
+            path.AddLine(wR - rr, bot, tX + tHalf, bot);
+            path.AddLine(tX + tHalf, bot, tX, bot + tH);
+            path.AddLine(tX, bot + tH, tX - tHalf, bot);
+            path.AddLine(tX - tHalf, bot, rr, bot);
+        } else {
+            path.AddLine(wR - rr, bot, rr, bot);
+        }
+        path.AddArc(0.5f, bot - rr - 0.5f, rr, rr, 90.0f, 90.0f);
         path.CloseFigure();
 
         Gdiplus::SolidBrush bg(Gdiplus::Color(244, 26, 29, 38));
@@ -1544,7 +1591,8 @@ static void ToastShow(int count, double freedMB) {
         g.DrawPath(&edge, &path);
 
         // 左侧勾：一个绿圆 + 两道白线，比 emoji 稳定
-        float iconCx = padX + iconW / 2.0f, iconCy = g_toastH / 2.0f;
+        float iconCx = padX + iconW / 2.0f;
+        float iconCy = (Gdiplus::REAL)bodyTop + bodyH / 2.0f;
         Gdiplus::SolidBrush ok(Gdiplus::Color(255, 66, 208, 142));
         g.FillEllipse(&ok, iconCx - iconW / 2.0f, iconCy - iconW / 2.0f, (Gdiplus::REAL)iconW, (Gdiplus::REAL)iconW);
         Gdiplus::Pen tick(Gdiplus::Color(255, 22, 24, 30), (Gdiplus::REAL)S(2));
@@ -1555,29 +1603,15 @@ static void ToastShow(int count, double freedMB) {
         g.DrawLine(&tick, tx + S(3), ty + S(3), tx + S(8), ty - S(4));
 
         float textX = (float)(padX + iconW + gap);
+        float textY = (Gdiplus::REAL)bodyTop + padY;
         Gdiplus::SolidBrush t1(Gdiplus::Color(255, 237, 241, 248));
         Gdiplus::SolidBrush t2(Gdiplus::Color(255, 110, 231, 183));
         Gdiplus::StringFormat sf;
         sf.SetAlignment(Gdiplus::StringAlignmentNear);
-        g.DrawString(g_toastL1.c_str(), -1, &f1, Gdiplus::PointF(textX, (Gdiplus::REAL)padY), &sf, &t1);
+        g.DrawString(g_toastL1.c_str(), -1, &f1, Gdiplus::PointF(textX, textY), &sf, &t1);
         g.DrawString(g_toastL2.c_str(), -1, &f2,
-                     Gdiplus::PointF(textX, (Gdiplus::REAL)padY + b1.Height + S(2)), &sf, &t2);
+                     Gdiplus::PointF(textX, textY + b1.Height + S(2)), &sf, &t2);
     }
-
-    // 摆在球上方，顶不下就放下方
-    RECT br{}, work{};
-    GetWindowRect(g_ball, &br);
-    // 球可能在外接屏上，这里要按球所在那块屏的工作区摆，不能用主屏的
-    MONITORINFO mi{ sizeof(mi) };
-    HMONITOR mon = MonitorFromWindow(g_ball, MONITOR_DEFAULTTONEAREST);
-    if (mon && GetMonitorInfoW(mon, &mi))
-        work = mi.rcWork;
-    else
-        SystemParametersInfoW(SPI_GETWORKAREA, 0, &work, 0);
-    int bx = br.left + ((br.right - br.left) - g_toastW) / 2;
-    int by = br.top - g_toastH - S(10);
-    if (by < work.top + S(4)) by = br.bottom + S(10);
-    bx = std::max((int)work.left + S(4), std::min(bx, (int)work.right - g_toastW - S(4)));
 
     SetWindowPos(g_toast, HWND_TOPMOST, bx, by, g_toastW, g_toastH,
                  SWP_NOACTIVATE | SWP_SHOWWINDOW);
@@ -1764,6 +1798,7 @@ static void SaveBallPos() {
 
 static void BallStartClean(HWND h) {
     if (g_ballCleaning) return;
+    ToastHide();               // 上一轮的气泡别和这次的转圈同时出现
     g_ballCleaning = true;
     g_ballSpin = 0;
     BallKick();
