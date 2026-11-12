@@ -37,7 +37,11 @@
 #pragma comment(lib, "dwmapi.lib")
 #pragma comment(lib, "gdiplus.lib")
 #pragma comment(lib, "advapi32.lib")
+// AITM_NO_ENTRY 只给 tools/safety_selftest.cpp 用：那个自检程序把这个文件 #include 进去，
+// 由它自己提供入口，所以这里不能抢着把子系统定成 WINDOWS。
+#ifndef AITM_NO_ENTRY
 #pragma comment(linker, "/SUBSYSTEM:WINDOWS /ENTRY:wWinMainCRTStartup")
+#endif
 
 static const wchar_t* APP_TITLE = L"AI 任务管理器";
 
@@ -94,6 +98,15 @@ static COLORREF C_BLUE         = RGB(77, 157, 224);
 
 enum Risk { RISK_PROTECTED, RISK_MODEL, RISK_SAFE, RISK_CAREFUL, RISK_NORMAL };
 
+// 进程身份。pid 只是编号：进程退出后系统会把这个号发给新进程，
+// 而快照到用户点「结束」之间隔着几秒，光凭 pid 下手可能杀到刚复用了这个号的新进程。
+// 所以连创建时间和映像名一起记下来，动手前再核一遍。
+struct ProcIdent {
+    DWORD        pid   = 0;
+    ULONGLONG    start = 0;     // 创建时间；0 = 快照时打不开，身份未知，后面一律不杀
+    std::wstring image;         // 快照时的映像名（小写）
+};
+
 struct ProcRow {
     std::wstring name;
     int    count = 0;
@@ -102,7 +115,7 @@ struct ProcRow {
     int    ageMin = 0;
     Risk   risk = RISK_NORMAL;
     std::wstring why;
-    std::vector<DWORD> pids;
+    std::vector<ProcIdent> pids;
 };
 
 struct Sample { double ram, com, vram, gpu, gpuT, cpuT, fan; };
@@ -383,10 +396,23 @@ static void Collect(Snapshot& s) {
                 auto& row = groups[key];
                 row.name = name;
                 row.count++;
-                row.pids.push_back(pid);
+                row.pids.push_back(ProcIdent{ pid, 0, key });
 
                 HANDLE h = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION | PROCESS_VM_READ, FALSE, pid);
-                if (!h) continue;
+                if (!h) continue;   // 打不开就留着 start=0，结束前会因身份未知跳过
+
+                FILETIME ct{}, et{}, kt{}, ut{};
+                if (GetProcessTimes(h, &ct, &et, &kt, &ut)) {
+                    row.pids.back().start = FileTimeToU64(ct);
+                    CpuSample now{ FileTimeToU64(kt), FileTimeToU64(ut) };
+                    curCpu[pid] = now;
+                    auto it = prevCpu.find(pid);
+                    if (it != prevCpu.end()) {
+                        double ds = (double)((now.kernel - it->second.kernel) +
+                                             (now.user - it->second.user)) / 10000000.0;
+                        if (ds > 0 && ds < 120) row.cpuPct += ds;
+                    }
+                }
 
                 PROCESS_MEMORY_COUNTERS_EX pmc{};
                 if (GetProcessMemoryInfo(h, (PROCESS_MEMORY_COUNTERS*)&pmc, sizeof(pmc))) {
@@ -395,18 +421,6 @@ static void Collect(Snapshot& s) {
                     if (key == L"llama-server.exe") {
                         s.modelRunning = true;
                         s.modelMemGB += mb / 1024.0;
-                    }
-                }
-
-                FILETIME ct{}, et{}, kt{}, ut{};
-                if (GetProcessTimes(h, &ct, &et, &kt, &ut)) {
-                    CpuSample now{ FileTimeToU64(kt), FileTimeToU64(ut) };
-                    curCpu[pid] = now;
-                    auto it = prevCpu.find(pid);
-                    if (it != prevCpu.end()) {
-                        double ds = (double)((now.kernel - it->second.kernel) +
-                                             (now.user - it->second.user)) / 10000000.0;
-                        if (ds > 0 && ds < 120) row.cpuPct += ds;
                     }
                 }
                 CloseHandle(h);
@@ -427,6 +441,16 @@ static void Collect(Snapshot& s) {
         }
         s.rows.push_back(r);
     }
+
+    // 本程序自己也在进程表里。RISK_TABLE 里写死的 exe 名不一定对得上（换个名字编译就漏了），
+    // 直接按 pid 认：谁身上带着自己的 pid，谁就是「本程序」，不允许被结束。
+    const DWORD selfPid = GetCurrentProcessId();
+    for (auto& r : s.rows) {
+        for (const auto& p : r.pids) {
+            if (p.pid == selfPid) { r.risk = RISK_PROTECTED; r.why = L"本程序"; break; }
+        }
+    }
+
     std::sort(s.rows.begin(), s.rows.end(),
               [](const ProcRow& a, const ProcRow& b) { return a.memMB > b.memMB; });
 }
@@ -577,7 +601,7 @@ static std::wstring AnswerQuestion(const std::wstring& q, const Snapshot& s) {
             gain += r.memMB;
         }
         if (i == 1) out += L"• 目前没有标记为「可关」的进程。\r\n";
-        out += Fmt(L"\r\n合计可释放 %.1f GB。点「执行建议」可以直接关（会二次确认）。", gain / 1024.0);
+        out += Fmt(L"\r\n合计可释放 %.1f GB。点「执行建议」可以关（先列清单确认，再逐个核对进程身份）。", gain / 1024.0);
         return out;
     }
     if (has(L"风扇") || has(L"散热") || has(L"温度")) {
@@ -608,14 +632,147 @@ static std::wstring AnswerQuestion(const std::wstring& q, const Snapshot& s) {
     return AnalyzeWhy(s);
 }
 
-static bool KillPids(const std::vector<DWORD>& pids, std::wstring& err) {
-    for (DWORD pid : pids) {
-        HANDLE h = OpenProcess(PROCESS_TERMINATE, FALSE, pid);
-        if (!h) { err += Fmt(L"pid %u 打不开（权限/已退出）\r\n", pid); continue; }
-        if (!TerminateProcess(h, 1)) err += Fmt(L"pid %u 结束失败（%u）\r\n", pid, GetLastError());
+// ------------------------------------------------------------------ 结束进程
+// 原则：先核对身份，再动手；核对不了就当它不是目标。
+struct KillReport {
+    int killed = 0;      // 真结束了
+    int gone = 0;        // 动手前自己退出了，无需处理
+    int skipped = 0;     // 身份对不上 / 系统关键进程，主动放过
+    int failed = 0;      // 有权限但没结束成功
+    std::wstring detail;
+};
+
+// IsProcessCritical 是 Win8.1 才导出的，动态取一下；取不到就只靠名字表兜着
+static bool IsCriticalProcess(HANDLE h) {
+    using Fn = BOOL (WINAPI*)(HANDLE, PBOOL);
+    static Fn fn = (Fn)(void*)GetProcAddress(GetModuleHandleW(L"kernel32.dll"), "IsProcessCritical");
+    if (!fn) return false;
+    BOOL critical = FALSE;
+    return fn(h, &critical) && critical;
+}
+
+// 校验的是「这个句柄指向的进程」是否还是快照里那一个：创建时间必须一致，映像名也要一致。
+// 时间对不上说明 pid 已被复用，名字对不上说明记录本身就串了——两种情况都不许杀。
+static bool VerifyIdentity(HANDLE h, const ProcIdent& want, std::wstring& why) {
+    if (want.start == 0) {
+        why = L"快照时读不到创建时间，身份无法核对";
+        return false;
+    }
+
+    FILETIME ct{}, et{}, kt{}, ut{};
+    if (!GetProcessTimes(h, &ct, &et, &kt, &ut)) {
+        why = Fmt(L"读创建时间失败（%u）", GetLastError());
+        return false;
+    }
+    if (FileTimeToU64(ct) != want.start) {
+        why = L"创建时间对不上，pid 已被别的进程复用";
+        return false;
+    }
+
+    wchar_t path[MAX_PATH * 2]{};
+    DWORD n = (DWORD)(sizeof(path) / sizeof(path[0]));
+    if (!QueryFullProcessImageNameW(h, 0, path, &n)) {
+        why = Fmt(L"读映像路径失败（%u），无法确认是不是它", GetLastError());
+        return false;
+    }
+    std::wstring base = path;
+    size_t slash = base.find_last_of(L"\\/");
+    if (slash != std::wstring::npos) base = base.substr(slash + 1);
+    if (Lower(base) != want.image) {
+        why = Fmt(L"映像名是 %s，已经不是快照里那个进程", base.c_str());
+        return false;
+    }
+    return true;
+}
+
+static KillReport KillPids(const std::vector<ProcIdent>& procs) {
+    KillReport rep;
+    const DWORD selfPid = GetCurrentProcessId();
+
+    for (const auto& want : procs) {
+        if (want.pid == 0 || want.pid == 4 || want.pid == selfPid) { rep.skipped++; continue; }
+
+        HANDLE h = OpenProcess(PROCESS_TERMINATE | PROCESS_QUERY_LIMITED_INFORMATION | SYNCHRONIZE,
+                               FALSE, want.pid);
+        if (!h) {
+            DWORD e = GetLastError();
+            if (e == ERROR_INVALID_PARAMETER) rep.gone++;   // 这个 pid 上已经没有进程了
+            else {
+                rep.failed++;
+                rep.detail += Fmt(L"· pid %u 打不开（%u）\r\n", want.pid, e);
+            }
+            continue;
+        }
+
+        if (WaitForSingleObject(h, 0) == WAIT_OBJECT_0) {     // 打开即已退出
+            rep.gone++;
+            CloseHandle(h);
+            continue;
+        }
+
+        std::wstring why;
+        if (!VerifyIdentity(h, want, why)) {
+            rep.skipped++;
+            rep.detail += Fmt(L"· pid %u 已跳过：%s\r\n", want.pid, why.c_str());
+            CloseHandle(h);
+            continue;
+        }
+
+        if (IsCriticalProcess(h)) {
+            rep.skipped++;
+            rep.detail += Fmt(L"· pid %u（%s）是系统关键进程，已拦截\r\n",
+                              want.pid, want.image.c_str());
+            CloseHandle(h);
+            continue;
+        }
+
+        if (TerminateProcess(h, 1)) {
+            rep.killed++;
+        } else {
+            DWORD e = GetLastError();
+            rep.failed++;
+            rep.detail += Fmt(L"· pid %u 结束失败（%u）\r\n", want.pid, e);
+        }
         CloseHandle(h);
     }
-    return err.empty();
+    return rep;
+}
+
+static void MergeKillReport(KillReport& dst, const KillReport& src) {
+    dst.killed += src.killed;
+    dst.gone += src.gone;
+    dst.skipped += src.skipped;
+    dst.failed += src.failed;
+    dst.detail += src.detail;
+}
+
+static std::wstring KillSummary(const KillReport& rep) {
+    std::wstring s = Fmt(L"结束 %d 个", rep.killed);
+    if (rep.gone)    s += Fmt(L"，%d 个已自行退出", rep.gone);
+    if (rep.skipped) s += Fmt(L"，%d 个身份核对不通过已放过", rep.skipped);
+    if (rep.failed)  s += Fmt(L"，%d 个失败（权限或系统保护）", rep.failed);
+    s += L"。";
+    if (!rep.detail.empty()) s += L"\r\n" + rep.detail;
+    return s;
+}
+
+// 确认框里把目标摊开写：名字、个数、占用。默认按钮落在「否」，回车不会误成「是」。
+// 目标按值传进来：确认框是模态的，这期间定时刷新会重建 g_snap.rows，
+// 外面还拿着行指针就会指向已释放的内存。
+static bool ConfirmTerminate(HWND owner, const wchar_t* title, const std::wstring& head,
+                             const std::vector<ProcRow>& rows, const std::wstring& tail) {
+    std::wstring list;
+    int shown = 0;
+    for (const auto& r : rows) {
+        if (shown++ >= 8) continue;      // 再列下去框就装不下了，剩下的报总数
+        list += Fmt(L"· %s × %d，%.0f MB\r\n", r.name.c_str(), (int)r.pids.size(), r.memMB);
+    }
+    if ((int)rows.size() > 8) list += Fmt(L"…… 另有 %d 项\r\n", (int)rows.size() - 8);
+
+    std::wstring text = head + L"\r\n\r\n" + list + L"\r\n" + tail;
+    if (text.size() > 3000) text = text.substr(0, 3000) + L"……";   // MessageBox 会截断长文本
+    return MessageBoxW(owner, text.c_str(), title,
+                       MB_YESNO | MB_ICONWARNING | MB_DEFBUTTON2) == IDYES;
 }
 
 static void AppendChat(const std::wstring& text) {
@@ -2585,32 +2742,49 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
             AppendChat(AnswerQuestion(q, g_snap));
             SetWindowTextW(g_input, L"");
         } else if (id == ID_BTN_CLEAN) {
-            double gain = 0;
-            int n = 0;
+            std::vector<ProcRow> targets;        // 按值拷贝，确认框期间列表刷新也不影响
             for (auto& r : g_snap.rows)
-                if (r.risk == RISK_SAFE && r.memMB >= 80) { gain += r.memMB; n++; }
-            if (!n) { AppendChat(L"没有可清理的进程。"); break; }
-            std::wstring q = Fmt(L"要结束 %d 组标记为「可关」的进程吗？\r\n预计释放 %.1f GB。", n, gain / 1024.0);
-            if (MessageBoxW(hwnd, q.c_str(), L"确认清理", MB_YESNO | MB_ICONQUESTION) != IDYES) break;
-            std::wstring err;
-            int killed = 0;
-            for (auto& r : g_snap.rows)
-                if (r.risk == RISK_SAFE && r.memMB >= 80) { KillPids(r.pids, err); killed++; }
-            AppendChat(Fmt(L"已结束 %d 组进程。%s", killed, err.empty() ? L"" : err.c_str()));
+                if (r.risk == RISK_SAFE && r.memMB >= 80) targets.push_back(r);
+            if (targets.empty()) { AppendChat(L"没有可清理的进程。"); break; }
+
+            int procs = 0;
+            for (auto& r : targets) procs += (int)r.pids.size();
+            std::wstring head = Fmt(L"将结束 %d 组共 %d 个进程：", (int)targets.size(), procs);
+            std::wstring tail = L"未保存的内容会丢；模型、编辑器等不在可关清单里，不会被选中。\r\n"
+                                L"执行时会逐个核对进程身份，对不上的一律不动。";
+            if (!ConfirmTerminate(hwnd, L"确认结束进程", head, targets, tail)) {
+                AppendChat(L"已取消，没有结束任何进程。");
+                break;
+            }
+            KillReport sum;
+            for (auto& r : targets) MergeKillReport(sum, KillPids(r.pids));
+            AppendChat(L"清理结果：" + KillSummary(sum));
             RefreshAsync(hwnd);
         } else if (id == ID_BTN_KILL) {
             int sel = ListView_GetNextItem(g_list, -1, LVNI_SELECTED);
             if (sel < 0 || sel >= (int)g_snap.rows.size()) { AppendChat(L"先在列表里选一行。"); break; }
-            ProcRow r = g_snap.rows[sel];
+            ProcRow r = g_snap.rows[sel];       // 拷贝一份：后面刷新列表不影响这里
             if (r.risk == RISK_PROTECTED) {
                 MessageBoxW(hwnd, L"这是系统/本程序进程，不允许结束。", L"已阻止", MB_ICONWARNING);
                 break;
             }
-            std::wstring q = Fmt(L"结束 %s 的 %d 个进程？\r\n%s", r.name.c_str(), r.count, r.why.c_str());
-            if (MessageBoxW(hwnd, q.c_str(), L"确认结束", MB_YESNO | MB_ICONWARNING) != IDYES) break;
-            std::wstring err;
-            if (KillPids(r.pids, err)) AppendChat(Fmt(L"已结束 %s（%.1f MB）。", r.name.c_str(), r.memMB));
-            else AppendChat(L"部分进程结束失败：\r\n" + err);
+
+            std::wstring warn;
+            if (r.risk == RISK_MODEL)
+                warn = L"这是本机的翻译模型，结束后要重新加载（几十秒）。";
+            else if (r.risk == RISK_CAREFUL)
+                warn = L"它可能有未保存的内容，结束后会丢。";
+            else
+                warn = L"这一项不在已知清单里，结束前请确认它不是正在用的重要程序。";
+
+            std::vector<ProcRow> one{ r };
+            std::wstring head = Fmt(L"结束 %s 的 %d 个进程？", r.name.c_str(), (int)r.pids.size());
+            std::wstring tail = r.why + L"\r\n" + warn + L"\r\n执行时会逐个核对进程身份，对不上的一律不动。";
+            if (!ConfirmTerminate(hwnd, L"确认结束进程", head, one, tail)) {
+                AppendChat(L"已取消，没有结束任何进程。");
+                break;
+            }
+            AppendChat(Fmt(L"%s：", r.name.c_str()) + KillSummary(KillPids(r.pids)));
             RefreshAsync(hwnd);
         } else if (id == ID_BTN_THEME) {
             g_mode = (g_mode + 1) % 3;
@@ -2797,6 +2971,7 @@ static void ApplyCaptionTheme(HWND hwnd) {
     DwmSetWindowAttribute(hwnd, DWMWA_BORDER_COLOR, &brd, sizeof(brd));
 }
 
+#ifndef AITM_NO_ENTRY
 int WINAPI wWinMain(HINSTANCE hInst, HINSTANCE, LPWSTR lpCmdLine, int) {
     InitializeCriticalSection(&g_lock);
     WriteTempScript();
@@ -2887,3 +3062,4 @@ int WINAPI wWinMain(HINSTANCE hInst, HINSTANCE, LPWSTR lpCmdLine, int) {
     Gdiplus::GdiplusShutdown(gdipToken);
     return 0;
 }
+#endif  // AITM_NO_ENTRY
