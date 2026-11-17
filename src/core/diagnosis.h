@@ -132,14 +132,14 @@ static std::wstring DiagnoseQuestion(const std::wstring& q, const Snapshot& s, c
 
     if (has(L"开发") || has(L"进程树") || has(L"归因") || has(L"workload")) return WorkloadReport(s);
     if (has(L"模型")) {
-        if (!s.modelRunning) return L"翻译模型当前没在跑（找不到 llama-server 进程）。";
+        if (!s.modelRunning) return L"当前快照未收集到 llama-server 的有效资源数据；不能据此证明没有模型任务。";
         return Fmt(L"模型占用：\r\n\r\n· 设备显存 %.1f / %.1f GB（不代表模型独占）\r\n"
                    L"· 进程内存 %.2f GB\r\n· 权重文件 %.1f GB（磁盘）\r\n\r\n"
                    L"仅凭设备显存和进程工作集不能推断模型内存布局、KV缓存或瓶颈。",
                    s.vramUsed, s.vramTotal, s.modelMemGB, ctx.weightsGB);
     }
     if (has(L"显存") || has(L"gpu") || has(L"显卡")) {
-        if (!s.hasGpu) return L"没有检测到 NVIDIA 显卡（nvidia-smi 不可用）。";
+        if (!s.hasGpu) return L"未取得 NVIDIA GPU 数据，可能数据源不可用或设备不受支持；不能据此证明没有 GPU。";
         return Fmt(L"GPU 利用率 %.0f%%，显存 %.1f / %.1f GB（%.0f%%），温度 %.0f°C。\r\n\r\n"
                    L"这是设备总量，不是模型专属占用。高占用不能确诊分配失败、推理变慢或打字卡顿原因。",
                    s.gpuUtil, s.vramUsed, s.vramTotal,
