@@ -76,7 +76,7 @@ int wmain() {
     {
         DWORD pid = 0;
         if (!SpawnSleeper(pid)) { Check(false, L"启动测试进程"); return 1; }
-        KillReport r = KillPids({ IdentOf(pid, L"ping.exe") });
+        KillReport r = KillPids({ IdentOf(pid, L"ping.exe") }, ForceAuthorization::ExplicitUserApproval);
         Check(r.killed + r.pending == 1, L"身份一致的目标已请求终止", Fmt(L"killed=%d", r.killed));
         Check(DeadWithin(pid, 3000), L"目标确实退出了");
     }
@@ -87,7 +87,7 @@ int wmain() {
         if (!SpawnSleeper(pid)) { Check(false, L"启动测试进程"); return 1; }
         ProcIdent id = IdentOf(pid, L"ping.exe");
         id.start += 10000000;                    // 往前错 1 秒 = 另一个进程的创建时间
-        KillReport r = KillPids({ id });
+        KillReport r = KillPids({ id }, ForceAuthorization::ExplicitUserApproval);
         Check(r.killed == 0 && r.skipped == 1, L"创建时间不符的目标被跳过",
               Fmt(L"killed=%d skipped=%d", r.killed, r.skipped));
         Check(StillAlive(pid), L"被跳过的进程还活着");
@@ -98,7 +98,7 @@ int wmain() {
     {
         DWORD pid = 0;
         if (!SpawnSleeper(pid)) { Check(false, L"启动测试进程"); return 1; }
-        KillReport r = KillPids({ IdentOf(pid, L"notepad.exe") });
+        KillReport r = KillPids({ IdentOf(pid, L"notepad.exe") }, ForceAuthorization::ExplicitUserApproval);
         Check(r.killed == 0 && r.skipped == 1, L"映像名不符的目标被跳过",
               Fmt(L"killed=%d skipped=%d", r.killed, r.skipped));
         Check(StillAlive(pid), L"被跳过的进程还活着");
@@ -111,7 +111,7 @@ int wmain() {
         if (!SpawnSleeper(pid)) { Check(false, L"启动测试进程"); return 1; }
         ProcIdent id = IdentOf(pid, L"ping.exe");
         id.start = 0;
-        KillReport r = KillPids({ id });
+        KillReport r = KillPids({ id }, ForceAuthorization::ExplicitUserApproval);
         Check(r.killed == 0 && r.skipped == 1, L"身份未知的目标被跳过",
               Fmt(L"killed=%d skipped=%d", r.killed, r.skipped));
         Check(StillAlive(pid), L"被跳过的进程还活着");
@@ -121,7 +121,7 @@ int wmain() {
     // 5. 目标是本程序自己：绝不下手
     {
         DWORD self = GetCurrentProcessId();
-        KillReport r = KillPids({ IdentOf(self, L"safety_selftest.exe") });
+        KillReport r = KillPids({ IdentOf(self, L"safety_selftest.exe") }, ForceAuthorization::ExplicitUserApproval);
         Check(r.killed == 0 && r.skipped == 1, L"拒绝结束自身进程",
               Fmt(L"killed=%d skipped=%d", r.killed, r.skipped));
     }
@@ -133,7 +133,7 @@ int wmain() {
         ProcIdent id = IdentOf(pid, L"ping.exe");
         KillRaw(pid);
         DeadWithin(pid, 3000);
-        KillReport r = KillPids({ id });
+        KillReport r = KillPids({ id }, ForceAuthorization::ExplicitUserApproval);
         Check(r.killed == 0 && r.gone == 1, L"已退出的目标记为 gone",
               Fmt(L"killed=%d gone=%d", r.killed, r.gone));
     }
@@ -143,10 +143,10 @@ int wmain() {
         if (!SpawnSleeper(pid)) return 1;
         ProcIdent id = IdentOf(pid, L"ping.exe");
         id.path += L".different";
-        auto r = KillPids({id});
+        auto r = KillPids({id}, ForceAuthorization::ExplicitUserApproval);
         Check(r.skipped == 1 && StillAlive(pid), L"完整路径不一致时拒绝结束");
         id = IdentOf(pid, L"csrss.exe");
-        r = KillPids({id});
+        r = KillPids({id}, ForceAuthorization::ExplicitUserApproval);
         Check(r.skipped == 1 && StillAlive(pid), L"执行层拦截保护名称");
         KillRaw(pid);
     }
