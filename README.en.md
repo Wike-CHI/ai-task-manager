@@ -50,8 +50,10 @@ See [MCP setup and limits](docs/p2-mcp.md).
 The [optional explanation boundary](docs/p2-llm-boundary.md) is disabled by default
 and is **not a connected local/remote LLM**. Its offline tests verify that a provider
 would receive only selected numeric evidence and could not rewrite retained facts
-or authorize actions. Real provider transport, credentials, isolation and evaluation
-are not implemented.
+or authorize actions. An opt-in [HTTP transport library](docs/p2-llm-transport.md)
+is implemented and mock-tested, with exact endpoint permission and no automatic connection.
+Real provider compatibility, consent UI, hard-deadline isolation and evaluation
+remain unverified or unimplemented.
 
 ## Useful GUI queries
 

@@ -176,6 +176,12 @@ jobs:
           PYTHONDONTWRITEBYTECODE: '1'
         run: python tools/llm_boundary_selftest.py
 
+      - name: Offline optional transport tests (network blocked)
+        shell: pwsh
+        env:
+          PYTHONDONTWRITEBYTECODE: '1'
+        run: python tools/llm_transport_selftest.py
+
       - name: Controlled owned-loopback bind failure demo
         shell: cmd
         run: |

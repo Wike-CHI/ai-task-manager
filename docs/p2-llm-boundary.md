@@ -36,3 +36,10 @@ timeouts, transport tests and a UI that renders model text as untrusted. Do not 
 this library into a client automatically or let model text change facts, commands,
 permissions or confirmation requirements. The current tests use only fake in-memory
 callbacks; they do not establish local-model or remote-service compatibility.
+
+## Subsequent transport preparation
+
+The separate [opt-in transport library](p2-llm-transport.md) now implements a
+mock-tested HTTP path using this boundary. It is still not connected to the GUI,
+CLI or MCP, does not configure a provider, and has not contacted a real model.
+The production integration and authorization gates above still apply.
