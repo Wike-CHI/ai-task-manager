@@ -50,3 +50,17 @@ Run `tools/safety_selftest.cpp` in Windows CI and a disposable local session. Te
 Manual UI checklist: cancel/No and default Enter terminate nothing; confirmation lists the frozen target set; refresh during the modal dialog does not change approved targets; a process created after confirmation is not added; repeating an action does not terminate a recycled PID. Confirm groups that may contain unsaved work are not classified as automatically safe.
 
 Keep build/test logs and exact commit with each benchmark. Passing CPU/RSS sampling is not proof of safety or a passed Windows UI test. Report each unrun case explicitly. A claimed improvement needs repeated comparable results; no speedup threshold is asserted before collecting a baseline.
+
+### Automated approval-barrier coverage
+
+`tools/confirmation_selftest.cpp` exercises the same `RunConfirmedTermination` used by
+both UI termination actions, with injected prompt/execution callbacks. It verifies
+all-approvals-before-execution, cancellation, invalid/duplicate identities and a
+refresh of the external snapshot during confirmation. The Windows safety test also
+asserts `MB_YESNO | MB_DEFBUTTON2` configuration. These are controller/configuration
+tests, **not real MessageBox interaction or three-theme visual acceptance**.
+
+The barrier owns a value copy of targets and rejects empty/incomplete/duplicate
+identities before asking. Execution still uses `KillPids` to revalidate the same
+opened handle. Approval is all-or-nothing; termination itself is not atomic and OS
+failures can produce partial results, which remain reported per target.
