@@ -50,7 +50,8 @@ struct ProcessNode {
     double memMB = 0, cpuPct = 0;
     ProcessIoSample ioCounters{};
     ProcessIoRate ioRate{};
-    bool memorySampleValid = false; // false is unknown, not a measured zero working set
+    bool memorySampleValid = false; // false is unknown, not measured zero working set
+    bool cpuSampleValid = false; // false is unknown, not measured zero CPU
 };
 
 enum class ResourceEventKind { ObservedNew, NoLongerObserved, WorkingSetChanged };

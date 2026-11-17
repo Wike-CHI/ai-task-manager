@@ -114,6 +114,14 @@ jobs:
           build\port_evidence_selftest.exe
           if errorlevel 1 exit /b 1
 
+      - name: Shared process identity tests
+        shell: cmd
+        run: |
+          cl /nologo /std:c++17 /EHsc /O2 /utf-8 /W3 /Fo:build\ tools\process_identity_selftest.cpp /Fe:build\process_identity_selftest.exe
+          if errorlevel 1 exit /b 1
+          build\process_identity_selftest.exe
+          if errorlevel 1 exit /b 1
+
       - name: Benchmark harness smoke test (not a product comparison)
         shell: pwsh
         run: |

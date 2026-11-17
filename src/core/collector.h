@@ -12,12 +12,7 @@
 #include "types.h"
 #include "policy.h"
 #include "io_metrics.h"
-static ULONGLONG FileTimeToU64(const FILETIME& ft) {
-    ULARGE_INTEGER u;
-    u.LowPart = ft.dwLowDateTime;
-    u.HighPart = ft.dwHighDateTime;
-    return u.QuadPart;
-}
+#include "process_identity.h"
 
 struct CpuSample { ULONGLONG kernel, user, start; };
 
@@ -61,15 +56,16 @@ static void CollectProcesses(Snapshot& s) {
                 HANDLE h = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION | PROCESS_VM_READ, FALSE, pid);
                 if (!h) continue;   // 打不开就留着 start=0，结束前会因身份未知跳过
 
-                wchar_t imagePath[32768]{};
-                DWORD pathSize = 32768;
-                if (QueryFullProcessImageNameW(h, 0, imagePath, &pathSize))
-                    row.pids.back().path = Lower(imagePath);
+                ProcIdent observed; std::wstring identityWhy;
+                if (!ReadProcessIdentity(h, observed, identityWhy) || observed.pid != pid ||
+                    !AcceptSampleIdentity(observed.start, snapshotStarted, observed.path, key)) {
+                    CloseHandle(h); continue;
+                }
+                observed.parentPid = pe.th32ParentProcessID;
+                row.pids.back() = observed;
                 FILETIME ct{}, et{}, kt{}, ut{};
                 if (GetProcessTimes(h, &ct, &et, &kt, &ut)) {
-                    if (!AcceptSampleIdentity(FileTimeToU64(ct), snapshotStarted,
-                            row.pids.back().path, key)) { CloseHandle(h); continue; }
-                    row.pids.back().start = FileTimeToU64(ct);
+                    if (FileTimeToU64(ct) != observed.start) { CloseHandle(h); continue; }
                     CpuSample now{ FileTimeToU64(kt), FileTimeToU64(ut), FileTimeToU64(ct) };
                     curCpu[pid] = now;
                     auto it = prevCpu.find(pid);
@@ -79,6 +75,7 @@ static void CollectProcesses(Snapshot& s) {
                                              (now.user - it->second.user)) / 10000000.0;
                         if (ds >= 0) {
                             node.cpuPct = ds / elapsed / std::max(1u, (unsigned)sys.dwNumberOfProcessors) * 100.0;
+                            node.cpuSampleValid = true;
                             row.cpuPct += node.cpuPct;
                         }
                     }

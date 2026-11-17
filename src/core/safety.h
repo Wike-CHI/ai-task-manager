@@ -1,6 +1,8 @@
 #pragma once
 #include <utility>
-#include "collector.h"
+#include "process_identity.h"
+#include "policy.h"
+#include <algorithm>
 #include "format.h"
 struct KillReport {
     int closed = 0;      // exited after a normal close request
@@ -12,57 +14,6 @@ struct KillReport {
     int failed = 0;      // 有权限但没结束成功
     std::wstring detail;
 };
-
-// Unknown critical status fails closed, including API failure.
-enum class CriticalState { Unknown, Critical, NotCritical };
-static CriticalState CriticalStatus(HANDLE h) {
-    using Fn = BOOL (WINAPI*)(HANDLE, PBOOL);
-    static Fn fn = (Fn)(void*)GetProcAddress(GetModuleHandleW(L"kernel32.dll"), "IsProcessCritical");
-    if (!fn) return CriticalState::Unknown;
-    BOOL critical = FALSE;
-    if (!fn(h, &critical)) return CriticalState::Unknown;
-    return critical ? CriticalState::Critical : CriticalState::NotCritical;
-}
-
-// 校验的是「这个句柄指向的进程」是否还是快照里那一个：创建时间必须一致，映像名也要一致。
-// 时间对不上说明 pid 已被复用，名字对不上说明记录本身就串了——两种情况都不许杀。
-static bool VerifyIdentity(HANDLE h, const ProcIdent& want, std::wstring& why) {
-    if (GetProcessId(h) != want.pid) {
-        why = L"句柄 PID 与快照不同"; return false;
-    }
-    if (want.start == 0 || want.path.empty()) {
-        why = L"快照身份不完整，无法核对";
-        return false;
-    }
-
-    FILETIME ct{}, et{}, kt{}, ut{};
-    if (!GetProcessTimes(h, &ct, &et, &kt, &ut)) {
-        why = Fmt(L"读创建时间失败（%u）", GetLastError());
-        return false;
-    }
-    if (FileTimeToU64(ct) != want.start) {
-        why = L"创建时间对不上，pid 已被别的进程复用";
-        return false;
-    }
-
-    wchar_t path[32768]{};
-    DWORD n = (DWORD)(sizeof(path) / sizeof(path[0]));
-    if (!QueryFullProcessImageNameW(h, 0, path, &n)) {
-        why = Fmt(L"读映像路径失败（%u），无法确认是不是它", GetLastError());
-        return false;
-    }
-    if (Lower(path) != want.path) {
-        why = L"完整映像路径不一致"; return false;
-    }
-    std::wstring base = path;
-    size_t slash = base.find_last_of(L"\\/");
-    if (slash != std::wstring::npos) base = base.substr(slash + 1);
-    if (Lower(base) != want.image) {
-        why = Fmt(L"映像名是 %s，已经不是快照里那个进程", base.c_str());
-        return false;
-    }
-    return true;
-}
 
 enum class ForceAuthorization { None, ExplicitUserApproval };
 static KillReport KillPids(const std::vector<ProcIdent>& procs, ForceAuthorization authorization) {
