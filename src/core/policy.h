@@ -43,3 +43,13 @@ static bool ProtectedImage(const std::wstring& image) {
     auto it = RISK_TABLE.find(Lower(image));
     return it != RISK_TABLE.end() && it->second.first == RISK_PROTECTED;
 }
+
+// Snapshot enumeration and OpenProcess are not atomic. A new process born
+// after enumeration began must wait for the next refresh, even with the same PID.
+static bool AcceptSampleIdentity(uint64_t creation, uint64_t snapshotStarted,
+        const std::wstring& imagePath, const std::wstring& snapshotName) {
+    auto slash = imagePath.find_last_of(L"\\/");
+    const auto base = slash == std::wstring::npos ? imagePath : imagePath.substr(slash + 1);
+    return creation != 0 && creation <= snapshotStarted && !imagePath.empty() &&
+        Lower(base) == Lower(snapshotName);
+}

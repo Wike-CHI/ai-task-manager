@@ -3,6 +3,7 @@
 #include "format.h"
 struct KillReport {
     int killed = 0;      // 真结束了
+    int pending = 0;     // termination requested; exit not yet observed
     int gone = 0;        // 动手前自己退出了，无需处理
     int skipped = 0;     // 身份对不上 / 系统关键进程，主动放过
     int failed = 0;      // 有权限但没结束成功
@@ -10,12 +11,14 @@ struct KillReport {
 };
 
 // Unknown critical status fails closed, including API failure.
-static bool IsCriticalProcess(HANDLE h) {
+enum class CriticalState { Unknown, Critical, NotCritical };
+static CriticalState CriticalStatus(HANDLE h) {
     using Fn = BOOL (WINAPI*)(HANDLE, PBOOL);
     static Fn fn = (Fn)(void*)GetProcAddress(GetModuleHandleW(L"kernel32.dll"), "IsProcessCritical");
-    if (!fn) return true;
+    if (!fn) return CriticalState::Unknown;
     BOOL critical = FALSE;
-    return !fn(h, &critical) || critical;
+    if (!fn(h, &critical)) return CriticalState::Unknown;
+    return critical ? CriticalState::Critical : CriticalState::NotCritical;
 }
 
 // 校验的是「这个句柄指向的进程」是否还是快照里那一个：创建时间必须一致，映像名也要一致。
@@ -61,6 +64,7 @@ static bool VerifyIdentity(HANDLE h, const ProcIdent& want, std::wstring& why) {
 static KillReport KillPids(const std::vector<ProcIdent>& procs) {
     KillReport rep;
     const DWORD selfPid = GetCurrentProcessId();
+    const auto deadline = GetTickCount64() + 250; // bounded across the entire group, not per PID
 
     for (const auto& want : procs) {
         if (want.pid == 0 || want.pid == 4 || want.pid == selfPid || ProtectedImage(want.image)) { rep.skipped++; continue; }
@@ -91,17 +95,21 @@ static KillReport KillPids(const std::vector<ProcIdent>& procs) {
             continue;
         }
 
-        if (IsCriticalProcess(h)) {
+        const auto critical = CriticalStatus(h);
+        if (critical != CriticalState::NotCritical) {
             rep.skipped++;
-            rep.detail += Fmt(L"· pid %u（%s）是系统关键进程，已拦截\r\n",
-                              want.pid, want.image.c_str());
+            rep.detail += Fmt(L"· pid %u（%s）%s，已拦截\r\n",
+                              want.pid, want.image.c_str(), critical == CriticalState::Unknown ?
+                              L"无法读取关键状态" : L"是系统关键进程");
             CloseHandle(h);
             continue;
         }
 
         if (TerminateProcess(h, 1)) {
-            if (WaitForSingleObject(h, 2000) == WAIT_OBJECT_0) rep.killed++;
-            else { rep.failed++; rep.detail += Fmt(L"· pid %u 已请求终止，但尚未确认退出\r\n", want.pid); }
+            const auto tick = GetTickCount64();
+            const DWORD remaining = tick < deadline ? (DWORD)(deadline - tick) : 0;
+            if (WaitForSingleObject(h, remaining) == WAIT_OBJECT_0) rep.killed++;
+            else { rep.pending++; rep.detail += Fmt(L"· pid %u 已请求终止，但尚未确认退出\r\n", want.pid); }
         } else {
             DWORD e = GetLastError();
             rep.failed++;
@@ -114,6 +122,7 @@ static KillReport KillPids(const std::vector<ProcIdent>& procs) {
 
 static void MergeKillReport(KillReport& dst, const KillReport& src) {
     dst.killed += src.killed;
+    dst.pending += src.pending;
     dst.gone += src.gone;
     dst.skipped += src.skipped;
     dst.failed += src.failed;
@@ -122,6 +131,7 @@ static void MergeKillReport(KillReport& dst, const KillReport& src) {
 
 static std::wstring KillSummary(const KillReport& rep) {
     std::wstring s = Fmt(L"结束 %d 个", rep.killed);
+    if (rep.pending) s += Fmt(L"，%d 个已请求终止但退出待确认", rep.pending);
     if (rep.gone)    s += Fmt(L"，%d 个已自行退出", rep.gone);
     if (rep.skipped) s += Fmt(L"，%d 个身份核对不通过已放过", rep.skipped);
     if (rep.failed)  s += Fmt(L"，%d 个失败（权限或系统保护）", rep.failed);

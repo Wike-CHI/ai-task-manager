@@ -54,6 +54,13 @@ jobs:
           ./tools/benchmark.ps1 -ProcessId $PID -Label Argus -ExpectedSha256 $hash -Revision harness-smoke -Scenario self -OutputDirectory build/bench-b -Samples 10 -IntervalMs 100
           ./tools/benchmark-compare.ps1 -AITaskManagerDirectory build/bench-a -ArgusDirectory build/bench-b
 
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: benchmark-harness-smoke-not-product-results
+          path: build/bench-*
+          if-no-files-found: ignore
+
       - name: Show artifact
         shell: pwsh
         run: |

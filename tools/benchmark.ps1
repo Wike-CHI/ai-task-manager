@@ -28,7 +28,7 @@ if ($logical -lt 1) { throw 'Cannot determine logical processor count.' }
 New-Item -ItemType Directory -Path $OutputDirectory | Out-Null
 $metadata = [ordered]@{
     schemaVersion = 1; label = $Label; revision = $Revision; scenario = $Scenario
-    executable = $exe; sha256 = $hash; fileVersion = $initial.FileVersionInfo.FileVersion
+    executable = $exe; sha256 = $hash; fileVersion = [Diagnostics.FileVersionInfo]::GetVersionInfo($exe).FileVersion
     processId = $ProcessId; processStartUtc = $started.ToString('o')
     measurementStartUtc = [DateTime]::UtcNow.ToString('o'); measurementEndUtc = $null
     osVersion = $osInfo.Version; osBuild = $osInfo.BuildNumber

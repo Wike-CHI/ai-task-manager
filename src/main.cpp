@@ -2269,7 +2269,7 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
             for (auto& r : g_snap.rows) {
                 if (i > 8) break;
                 out += Fmt(L"%d. %s —— %.1f MB × %d%s\r\n", i++, r.name.c_str(), r.memMB, r.count,
-                           RiskTag(r.risk).empty() ? L"" : L" [" + RiskTag(r.risk) + L"]");
+                           RiskTag(r.risk).empty() ? L"" : (L" [" + RiskTag(r.risk) + L"]").c_str());
             }
             AppendChat(out);
         } else if (id == ID_BTN_ASK) {
@@ -2294,8 +2294,9 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
                 AppendChat(L"已取消，没有结束任何进程。");
                 break;
             }
-            KillReport sum;
-            for (auto& r : targets) MergeKillReport(sum, KillPids(r.pids));
+            std::vector<ProcIdent> identities;
+            for (const auto& r : targets) identities.insert(identities.end(), r.pids.begin(), r.pids.end());
+            KillReport sum = KillPids(identities);
             AppendChat(L"清理结果：" + KillSummary(sum));
             RefreshAsync(hwnd);
         } else if (id == ID_BTN_KILL) {

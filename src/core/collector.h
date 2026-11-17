@@ -1,4 +1,7 @@
 #pragma once
+#ifndef NOMINMAX
+#define NOMINMAX
+#endif
 #include <windows.h>
 #include <tlhelp32.h>
 #include <psapi.h>
@@ -25,6 +28,8 @@ static void CollectProcesses(Snapshot& s) {
     std::map<std::wstring, ProcRow> groups;
 
     s.processes.clear();
+    FILETIME started{}; GetSystemTimeAsFileTime(&started);
+    const auto snapshotStarted = FileTimeToU64(started);
     HANDLE snap = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0);
     if (snap != INVALID_HANDLE_VALUE) {
         PROCESSENTRY32W pe{};
@@ -53,6 +58,8 @@ static void CollectProcesses(Snapshot& s) {
                     row.pids.back().path = Lower(imagePath);
                 FILETIME ct{}, et{}, kt{}, ut{};
                 if (GetProcessTimes(h, &ct, &et, &kt, &ut)) {
+                    if (!AcceptSampleIdentity(FileTimeToU64(ct), snapshotStarted,
+                            row.pids.back().path, key)) { CloseHandle(h); continue; }
                     row.pids.back().start = FileTimeToU64(ct);
                     CpuSample now{ FileTimeToU64(kt), FileTimeToU64(ut), FileTimeToU64(ct) };
                     curCpu[pid] = now;

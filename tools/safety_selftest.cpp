@@ -74,7 +74,7 @@ int wmain() {
         DWORD pid = 0;
         if (!SpawnSleeper(pid)) { Check(false, L"启动测试进程"); return 1; }
         KillReport r = KillPids({ IdentOf(pid, L"ping.exe") });
-        Check(r.killed == 1, L"身份一致的目标被结束", Fmt(L"killed=%d", r.killed));
+        Check(r.killed + r.pending == 1, L"身份一致的目标已请求终止", Fmt(L"killed=%d", r.killed));
         Check(DeadWithin(pid, 3000), L"目标确实退出了");
     }
 
