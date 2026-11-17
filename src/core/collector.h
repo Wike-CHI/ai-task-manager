@@ -8,6 +8,7 @@
 #include <algorithm>
 #include "types.h"
 #include "policy.h"
+#include "io_metrics.h"
 static ULONGLONG FileTimeToU64(const FILETIME& ft) {
     ULARGE_INTEGER u;
     u.LowPart = ft.dwLowDateTime;
@@ -19,12 +20,14 @@ struct CpuSample { ULONGLONG kernel, user, start; };
 
 static void CollectProcesses(Snapshot& s) {
     static std::map<DWORD, CpuSample> prevCpu;
+    static std::map<DWORD, ProcessIoSample> prevIo;
     static ULONGLONG previousTick = 0;
     const auto tick = GetTickCount64();
     const double elapsed = previousTick ? (tick - previousTick) / 1000.0 : 0;
     previousTick = tick;
     SYSTEM_INFO sys{}; GetSystemInfo(&sys);
     std::map<DWORD, CpuSample> curCpu;
+    std::map<DWORD, ProcessIoSample> curIo;
     std::map<std::wstring, ProcRow> groups;
 
     s.processes.clear();
@@ -76,6 +79,19 @@ static void CollectProcesses(Snapshot& s) {
                     }
                 }
 
+                // Keep a per-process observation timestamp: enumeration duration
+                // is not necessarily identical between successive snapshots.
+                IO_COUNTERS io{};
+                if (row.pids.back().start && GetProcessIoCounters(h, &io)) {
+                    node.ioCounters = {pid, row.pids.back().start, GetTickCount64(),
+                        io.ReadTransferCount, io.WriteTransferCount, true};
+                    auto prior = prevIo.find(pid);
+                    node.ioRate = CalculateIoRate(prior == prevIo.end() ? nullptr : &prior->second,
+                                                 node.ioCounters);
+                    curIo[pid] = node.ioCounters;
+                }
+                // Failed samples are deliberately absent from curIo, breaking
+                // the baseline so later recovery cannot look like a fresh rate.
                 PROCESS_MEMORY_COUNTERS_EX pmc{};
                 if (GetProcessMemoryInfo(h, (PROCESS_MEMORY_COUNTERS*)&pmc, sizeof(pmc))) {
                     double mb = pmc.WorkingSetSize / 1048576.0;
@@ -93,6 +109,7 @@ static void CollectProcesses(Snapshot& s) {
         s.procCount = count;
     }
     prevCpu.swap(curCpu);
+    prevIo.swap(curIo);
 
     s.rows.clear();
     for (auto& kv : groups) {

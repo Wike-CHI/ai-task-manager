@@ -28,10 +28,27 @@ struct ProcRow {
 
 struct Sample { double ram, com, vram, gpu, gpuT, cpuT, fan; };
 
+// GetProcessIoCounters includes cached, network and device I/O. These counters
+// are NOT physical disk traffic or hard-page-fault measurements.
+struct ProcessIoSample {
+    uint32_t pid = 0;
+    uint64_t creation = 0, tickMs = 0;
+    uint64_t readBytes = 0, writeBytes = 0;
+    bool valid = false;
+};
+enum class IoRateState { Unavailable, FirstSample, IdentityChanged, CounterReset, InvalidInterval, Measured };
+struct ProcessIoRate {
+    IoRateState state = IoRateState::Unavailable;
+    double readBytesPerSecond = 0, writeBytesPerSecond = 0, elapsedSeconds = 0;
+    bool available() const { return state == IoRateState::Measured; }
+};
+
 struct ProcessNode {
     ProcIdent identity;
     uint32_t parentPid = 0;
     double memMB = 0, cpuPct = 0;
+    ProcessIoSample ioCounters{};
+    ProcessIoRate ioRate{};
 };
 
 struct Snapshot {

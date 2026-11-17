@@ -16,13 +16,13 @@ struct DiagnosticFinding {
     std::vector<DiagnosticEvidence> evidence;
     std::vector<std::wstring> unknowns, nextSteps;
 };
-static std::wstring EvidenceNumber(double value) {
+inline std::wstring EvidenceNumber(double value) {
     std::wostringstream out; out << std::fixed << std::setprecision(2) << value; return out.str();
 }
-static bool ValidCapacity(double used, double total) {
+inline bool ValidCapacity(double used, double total) {
     return std::isfinite(used) && std::isfinite(total) && used >= 0 && total > 0 && used <= total;
 }
-static DiagnosticFinding CapacityFinding(const wchar_t* id, const wchar_t* label,
+inline DiagnosticFinding CapacityFinding(const wchar_t* id, const wchar_t* label,
     double used, double total, double threshold, const wchar_t* source) {
     DiagnosticFinding f; f.id = id;
     if (!ValidCapacity(used, total)) {
@@ -44,13 +44,13 @@ static DiagnosticFinding CapacityFinding(const wchar_t* id, const wchar_t* label
     f.nextSteps = {L"结合实际错误记录和连续样本判断，不依据阈值自动结束进程"};
     return f;
 }
-static DiagnosticFinding UnknownFinding(const wchar_t* id, const wchar_t* conclusion,
+inline DiagnosticFinding UnknownFinding(const wchar_t* id, const wchar_t* conclusion,
     const wchar_t* missing, const wchar_t* next) {
     DiagnosticFinding f; f.id = id; f.conclusion = conclusion;
     f.unknowns = {missing}; f.nextSteps = {next}; return f;
 }
 // Only these measurements are collected. No injected text can grant write actions.
-static std::vector<DiagnosticFinding> BuildDiagnosticFindings(const Snapshot& snapshot) {
+inline std::vector<DiagnosticFinding> BuildDiagnosticFindings(const Snapshot& snapshot) {
     std::vector<DiagnosticFinding> out;
     out.push_back(CapacityFinding(L"physical_memory", L"物理内存", snapshot.ramUsedGB,
         snapshot.ramTotalGB, .88, L"GlobalMemoryStatusEx"));
@@ -75,7 +75,7 @@ static std::vector<DiagnosticFinding> BuildDiagnosticFindings(const Snapshot& sn
         L"后续接入经验证的 ETW/性能计数器，并保留缺失状态"));
     return out;
 }
-static std::wstring RenderDiagnosticFindings(const std::vector<DiagnosticFinding>& findings) {
+inline std::wstring RenderDiagnosticFindings(const std::vector<DiagnosticFinding>& findings) {
     std::wstring out = L"证据诊断（快照证据，不保证新鲜度；无故障概率估计）：\r\n";
     for (const auto& f : findings) {
         const wchar_t* status = f.state == FindingState::Risk ? L"风险提示" :

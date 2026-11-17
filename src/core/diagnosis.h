@@ -4,6 +4,7 @@
 #include "policy.h"
 #include "format.h"
 #include "diagnostic_evidence.h"
+#include "io_evidence.h"
 struct DiagnosticContext {
     const Sample* history;
     int historyCount, historyHead, historyCapacity;
@@ -123,6 +124,8 @@ static std::wstring WorkloadReport(const Snapshot& s) {
 static std::wstring DiagnoseQuestion(const std::wstring& q, const Snapshot& s, const DiagnosticContext& ctx) {
     std::wstring low = Lower(q);
     auto has = [&](const wchar_t* k) { return low.find(k) != std::wstring::npos; };
+
+    if (has(L"io") || has(L"磁盘")) return ProcessIoReport(s);
 
     if (has(L"证据") || has(L"诊断") || has(L"oom") || has(L"端口") || has(L"异常"))
         return RenderDiagnosticFindings(BuildDiagnosticFindings(s));
