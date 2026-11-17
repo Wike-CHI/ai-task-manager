@@ -260,8 +260,11 @@ static double WeightsGB() {
 }
 
 #include "core/collector.h"
+#include "core/resource_events.h"
 
 static void Collect(Snapshot& s) {
+    s.sampleComplete = false;
+    s.sampleStartMs = GetTickCount64();
     MEMORYSTATUSEX ms{};
     ms.dwLength = sizeof(ms);
     GlobalMemoryStatusEx(&ms);
@@ -296,6 +299,8 @@ static void Collect(Snapshot& s) {
     s.modelMemGB = 0;
 
     CollectProcesses(s);
+    s.sampleEndMs = GetTickCount64();
+    s.sampleComplete = true;
 }
 
 #include "core/diagnosis.h"
@@ -893,12 +898,19 @@ static void RefreshAsync(HWND hwnd) {
     std::thread([hwnd]() {
         auto* snap = new Snapshot();
         Collect(*snap);
-        PostMessageW(hwnd, WM_APP_SNAPSHOT, 0, (LPARAM)snap);
+        if (!PostMessageW(hwnd, WM_APP_SNAPSHOT, 0, (LPARAM)snap)) {
+            delete snap;
+            g_busy = false;
+        }
     }).detach();
 }
 
 static void OnSnapshot(HWND hwnd, Snapshot* snap) {
     EnterCriticalSection(&g_lock);
+    const auto events = CompareResourceSnapshots(g_snap.sampleComplete ? &g_snap : nullptr, *snap);
+    snap->resourceEvents = events.events;
+    snap->resourceEventState = events.state;
+    snap->resourceEventsOmitted = events.omitted;
     g_snap = *snap;
     delete snap;
     PushHistory(g_snap);

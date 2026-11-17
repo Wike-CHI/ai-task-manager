@@ -6,6 +6,7 @@
 #include "diagnostic_evidence.h"
 #include "io_evidence.h"
 #include "diagnostic_query.h"
+#include "resource_event_report.h"
 struct DiagnosticContext {
     const Sample* history;
     int historyCount, historyHead, historyCapacity;
@@ -52,7 +53,7 @@ static std::wstring TempTrendText(const DiagnosticContext& ctx) {
 }
 
 static std::wstring Diagnose(const Snapshot& s, const DiagnosticContext& ctx) {
-    std::wstring out = RenderDiagnosticFindings(BuildDiagnosticFindings(s));
+    std::wstring out = SnapshotTimingReport(s, GetTickCount64()) + RenderDiagnosticFindings(BuildDiagnosticFindings(s));
 
     if (ctx.gpuTemp > 0) {
         out += Fmt(L"· 温度：GPU %.0f°C（风扇 %.0f%%）", ctx.gpuTemp, ctx.fan);
@@ -126,8 +127,10 @@ static std::wstring DiagnoseQuestion(const std::wstring& q, const Snapshot& s, c
     std::wstring low = Lower(q);
     auto has = [&](const wchar_t* k) { return low.find(k) != std::wstring::npos; };
 
+    if (has(L"事件") || has(L"变化") || has(L"新鲜") || has(L"event"))
+        return ResourceEventReport(s, GetTickCount64());
     const auto route = RouteDiagnosticQuery(q);
-    if (route == DiagnosticQueryRoute::Evidence) return RenderDiagnosticFindings(BuildDiagnosticFindings(s));
+    if (route == DiagnosticQueryRoute::Evidence) return SnapshotTimingReport(s, GetTickCount64()) + RenderDiagnosticFindings(BuildDiagnosticFindings(s));
     if (route == DiagnosticQueryRoute::ProcessIo) return ProcessIoReport(s);
 
     if (has(L"开发") || has(L"进程树") || has(L"归因") || has(L"workload")) return WorkloadReport(s);
