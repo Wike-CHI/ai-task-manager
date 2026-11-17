@@ -179,8 +179,6 @@ static std::wstring DiagnoseQuestion(const std::wstring& q, const Snapshot& s, c
     if (has(L"趋势") || has(L"曲线") || has(L"历史"))
         return Fmt(L"曲线保留最近 %d 个点（约 %d 秒）：绿色=内存，黄色=提交，蓝色=显存。\r\n当前趋势：%s",
                    ctx.historyCount, ctx.historyCount * 2, TrendText(ctx).c_str());
-    if (has(L"磁盘") || has(L"io"))
-        return L"进程 I/O 字节包含缓存和设备访问，不是物理磁盘吞吐；尚无硬缺页/磁盘延迟证据，不能确诊换页导致卡顿。";
     if (has(L"进程") || has(L"多少"))
         return Fmt(L"当前 %d 个进程，合并同名后 %d 项，内存总量 %.1f GB。",
                    s.procCount, (int)s.rows.size(), s.ramUsedGB);

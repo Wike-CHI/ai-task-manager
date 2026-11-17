@@ -1,8 +1,15 @@
 #include "../src/core/collector.h"
 #include "../src/core/io_evidence.h"
+#include "../src/core/diagnosis.h"
 #include <iostream>
 #pragma comment(lib, "psapi.lib")
 int main() {
+    Snapshot empty; DiagnosticContext context{};
+    const bool routes = DiagnoseQuestion(L"GPU allocation failure",empty,context).find(L"GPU 显存分配失败未确诊") != std::wstring::npos &&
+        DiagnoseQuestion(L"version",empty,context).find(L"证据诊断") != std::wstring::npos &&
+        DiagnoseQuestion(L"IO",empty,context).find(L"进程 I/O 观测") != std::wstring::npos;
+    std::cout << (routes ? "PASS" : "FAIL") << " production diagnostic query routing\n";
+    if (!routes) return 1;
     Snapshot first, second; CollectProcesses(first); Sleep(30); CollectProcesses(second);
     for (const auto& node : second.processes) {
         if(node.identity.pid != GetCurrentProcessId()) continue;
