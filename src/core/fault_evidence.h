@@ -75,9 +75,11 @@ inline std::vector<DiagnosticFinding> ParseProvidedFaultEvidence(const std::wstr
 inline size_t ProvidedFaultPrefixLength(const std::wstring& query) {
     std::wstring lower=query;
     for(auto& c:lower) c=static_cast<wchar_t>(std::towlower(c));
+    const auto start=lower.find_first_not_of(L" \t\r\n");
+    if(start==std::wstring::npos) return 0;
     for(const auto* prefix:{L"日志证据:",L"日志证据：",L"log evidence:"}) {
         const std::wstring p(prefix);
-        if(lower.rfind(p,0)==0) return p.size();
+        if(lower.compare(start,p.size(),p)==0) return start+p.size();
     }
     return 0;
 }

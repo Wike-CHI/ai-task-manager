@@ -33,6 +33,7 @@ int main() {
           ProvidedFaultPrefixLength(L"LOG EVIDENCE: CUDA out of memory.")>0,"explicit aliases enable evidence input");
     check(ProvidedFaultPrefixLength(L"Error: listen EADDRINUSE")==0 &&
           ProvidedFaultPrefixLength(L"解释日志证据: OOM")==0,"ordinary queries do not opt into parsing");
+    check(ProvidedFaultPrefixLength(L"  日志证据: private text") == 7, "leading whitespace still suppresses raw log echo");
     std::cout<<count<<" fault-text checks, "<<failures<<" failures\n";
     return failures?1:0;
 }
