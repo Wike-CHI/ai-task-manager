@@ -3,6 +3,7 @@
 #include "workloads.h"
 #include "policy.h"
 #include "format.h"
+#include "diagnostic_evidence.h"
 struct DiagnosticContext {
     const Sample* history;
     int historyCount, historyHead, historyCapacity;
@@ -49,32 +50,7 @@ static std::wstring TempTrendText(const DiagnosticContext& ctx) {
 }
 
 static std::wstring Diagnose(const Snapshot& s, const DiagnosticContext& ctx) {
-    std::wstring out;
-    bool ramHigh = s.ramPct >= 88;
-    bool comHigh = s.comPct >= 85;
-    bool vramHigh = s.hasGpu && s.vramTotal > 0 && s.vramUsed / s.vramTotal > 0.92;
-
-    if (comHigh || ramHigh) {
-        out += L"结论：内存压力较高；是否换页导致卡顿仍需磁盘/硬缺页证据。\r\n\r\n";
-        out += Fmt(L"· 物理内存 %.1f / %.1f GB（%.0f%%）\r\n", s.ramUsedGB, s.ramTotalGB, s.ramPct);
-        out += Fmt(L"· 提交内存 %.1f / %.1f GB（%.0f%%）\r\n", s.comUsedGB, s.comTotalGB, s.comPct);
-        out += L"· 提交接近上限提示分配失败风险；仅凭使用率不能断定正在换页。";
-        out += TrendText(ctx) + L"\r\n";
-    } else if (vramHigh) {
-        out += L"结论：显存接近打满，模型推理变慢，但打字不会卡。\r\n\r\n";
-        out += Fmt(L"· 显存 %.1f / %.1f GB（%.0f%%）\r\n",
-                   s.vramUsed, s.vramTotal, s.vramUsed / s.vramTotal * 100);
-    } else {
-        out += L"结论：资源正常，没看到明显瓶颈。\r\n\r\n";
-        out += Fmt(L"· 内存 %.1f / %.1f GB（%.0f%%），提交 %.1f / %.1f GB（%.0f%%）\r\n",
-                   s.ramUsedGB, s.ramTotalGB, s.ramPct, s.comUsedGB, s.comTotalGB, s.comPct);
-    }
-
-    if (s.hasGpu)
-        out += Fmt(L"· GPU %.0f%%，显存 %.1f / %.1f GB，CPU %.0f%%\r\n",
-                   s.gpuUtil, s.vramUsed, s.vramTotal, s.cpuPct);
-    else
-        out += Fmt(L"· CPU %.0f%%（没有检测到 N 卡）\r\n", s.cpuPct);
+    std::wstring out = RenderDiagnosticFindings(BuildDiagnosticFindings(s));
 
     if (ctx.gpuTemp > 0) {
         out += Fmt(L"· 温度：GPU %.0f°C（风扇 %.0f%%）", ctx.gpuTemp, ctx.fan);
@@ -100,13 +76,13 @@ static std::wstring Diagnose(const Snapshot& s, const DiagnosticContext& ctx) {
                    tag.empty() ? L"" : (L"[" + tag + L"]").c_str());
     }
 
-    out += L"\r\n建议（按释放量）：\r\n";
+    out += L"\r\n候选与策略（工作集不等于可释放量）：\r\n";
     int idx = 1;
     double gain = 0;
     for (auto& r : s.rows) {
         if (r.risk != RISK_SAFE || r.memMB < 80) continue;
         if (idx > 4) break;
-        out += Fmt(L"%d. 关掉 %s —— 释放 %.1f GB（%s）\r\n",
+        out += Fmt(L"%d. 候选 %s —— 工作集 %.1f GB（%s）\r\n",
                    idx++, r.name.c_str(), r.memMB / 1024.0, r.why.c_str());
         gain += r.memMB;
     }
@@ -148,23 +124,26 @@ static std::wstring DiagnoseQuestion(const std::wstring& q, const Snapshot& s, c
     std::wstring low = Lower(q);
     auto has = [&](const wchar_t* k) { return low.find(k) != std::wstring::npos; };
 
+    if (has(L"证据") || has(L"诊断") || has(L"oom") || has(L"端口") || has(L"异常"))
+        return RenderDiagnosticFindings(BuildDiagnosticFindings(s));
+
     if (has(L"开发") || has(L"进程树") || has(L"归因") || has(L"workload")) return WorkloadReport(s);
     if (has(L"模型")) {
         if (!s.modelRunning) return L"翻译模型当前没在跑（找不到 llama-server 进程）。";
-        return Fmt(L"模型占用：\r\n\r\n· 显存 %.1f / %.1f GB（含 KV 缓存）\r\n"
+        return Fmt(L"模型占用：\r\n\r\n· 设备显存 %.1f / %.1f GB（不代表模型独占）\r\n"
                    L"· 进程内存 %.2f GB\r\n· 权重文件 %.1f GB（磁盘）\r\n\r\n"
-                   L"它吃的是显存，内存占比不高——按内存排序会排第一，别误杀。",
+                   L"仅凭设备显存和进程工作集不能推断模型内存布局、KV缓存或瓶颈。",
                    s.vramUsed, s.vramTotal, s.modelMemGB, ctx.weightsGB);
     }
     if (has(L"显存") || has(L"gpu") || has(L"显卡")) {
         if (!s.hasGpu) return L"没有检测到 NVIDIA 显卡（nvidia-smi 不可用）。";
         return Fmt(L"GPU 利用率 %.0f%%，显存 %.1f / %.1f GB（%.0f%%），温度 %.0f°C。\r\n\r\n"
-                   L"显存大头是翻译模型。超过 92%% 时推理会变慢，但不会影响打字——打字卡是内存换页。",
+                   L"这是设备总量，不是模型专属占用。高占用不能确诊分配失败、推理变慢或打字卡顿原因。",
                    s.gpuUtil, s.vramUsed, s.vramTotal,
                    s.vramTotal > 0 ? s.vramUsed / s.vramTotal * 100 : 0, s.gpuTemp);
     }
     if (has(L"关") || has(L"清理") || has(L"释放") || has(L"杀")) {
-        std::wstring out = L"按「关掉基本无损」排序：\r\n\r\n";
+        std::wstring out = L"分类仅名称启发式，不保证无损；先保存任务：\r\n\r\n";
         double gain = 0;
         int i = 1;
         for (auto& r : s.rows) {
@@ -174,7 +153,7 @@ static std::wstring DiagnoseQuestion(const std::wstring& q, const Snapshot& s, c
             gain += r.memMB;
         }
         if (i == 1) out += L"• 目前没有标记为「可关」的进程。\r\n";
-        out += Fmt(L"\r\n合计可释放 %.1f GB。点「执行建议」可以关（先列清单确认，再逐个核对进程身份）。", gain / 1024.0);
+        out += Fmt(L"\r\n候选工作集合计 %.1f GB，不是可释放量；无默认安全名单，不自动结束。", gain / 1024.0);
         return out;
     }
     if (has(L"风扇") || has(L"散热") || has(L"温度")) {
@@ -198,7 +177,7 @@ static std::wstring DiagnoseQuestion(const std::wstring& q, const Snapshot& s, c
         return Fmt(L"曲线保留最近 %d 个点（约 %d 秒）：绿色=内存，黄色=提交，蓝色=显存。\r\n当前趋势：%s",
                    ctx.historyCount, ctx.historyCount * 2, TrendText(ctx).c_str());
     if (has(L"磁盘") || has(L"io"))
-        return L"磁盘 IO 没单独采样。判断是否换页看「提交」和曲线：提交逼近上限时系统会把内存页写回磁盘，整机变卡。";
+        return L"进程 I/O 字节包含缓存和设备访问，不是物理磁盘吞吐；尚无硬缺页/磁盘延迟证据，不能确诊换页导致卡顿。";
     if (has(L"进程") || has(L"多少"))
         return Fmt(L"当前 %d 个进程，合并同名后 %d 项，内存总量 %.1f GB。",
                    s.procCount, (int)s.rows.size(), s.ramUsedGB);
