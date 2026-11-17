@@ -22,6 +22,7 @@ $rawReport = & $exe report
 if ($LASTEXITCODE -ne 0) { throw 'Report collection failed in CI' }
 $r = $rawReport | ConvertFrom-Json
 if ($r.schemaVersion -ne 1 -or $r.readOnly -ne $true -or $r.kind -ne 'findings') { throw 'Invalid report envelope' }
+if (-not $r.sampling.complete -or -not $r.sampling.processEnumerationComplete -or $r.sampling.endMs -isnot [string]) { throw 'Report lacks exact sample/completeness metadata' }
 if (@($r.findings).Count -ne 8) { throw 'Unexpected deterministic finding set' }
 foreach ($id in @('node_oom','port_conflict','gpu_allocation','background_anomaly','hard_faults')) {
     $f = @($r.findings | Where-Object { $_.id -eq $id })

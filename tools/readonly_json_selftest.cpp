@@ -56,6 +56,7 @@ int main(int argc,char**) {
           out.find("\"unknowns\":[\"missing\"],\"nextSteps\":[\"observe\"]")!=std::string::npos,"finding uncertainty preserved");
     check(out.find("{\"metric\":\"a\",\"value\":\"b\",\"unit\":\"c\",\"source\":\"d\"}")!=std::string::npos,"evidence names stable");
     check(SerializeFindingsJson({}).find("\"findings\":[]")!=std::string::npos,"empty findings valid array");
+    check(SerializeFindingsJson({}, &s).find("\"sampling\":{\"startMs\":\"0\",\"endMs\":\"9007199254740993\"")!=std::string::npos, "report can retain exact sample metadata");
     if(argc>1) std::cout<<"SNAPSHOT_JSON="<<json<<"\nFINDINGS_JSON="<<out<<'\n';
     std::cout<<count<<" readonly JSON checks, "<<failures<<" failures\n";
     return failures?1:0;

@@ -157,12 +157,15 @@ inline std::string SerializeSnapshotJson(const Snapshot& s) {
         ",\"resourceEventState\":\""+EventState(s.resourceEventState)+"\",\"resourceEventsOmitted\":"+Integer(s.resourceEventsOmitted)+
         ",\"resourceEvents\":"+events+"}";
 }
-inline std::string SerializeFindingsJson(const std::vector<DiagnosticFinding>& findings) {
+inline std::string SerializeFindingsJson(const std::vector<DiagnosticFinding>& findings, const Snapshot* sample = nullptr) {
     using namespace readonly_json;
     std::string items="["; bool first=true;
     for(const auto& f:findings) Item(items,first,Finding(f));
     items+=']';
+    const std::string sampling = sample ? ",\"sampling\":{\"startMs\":"+Integer(sample->sampleStartMs)+
+        ",\"endMs\":"+Integer(sample->sampleEndMs)+",\"complete\":"+Boolean(sample->sampleComplete)+
+        ",\"processEnumerationComplete\":"+Boolean(sample->processEnumerationComplete)+"}" : "";
     return "{\"schemaVersion\":1,\"readOnly\":true,\"kind\":\"findings\",\"source\":\"local deterministic diagnosis engine\","
         "\"limitations\":[\"Confidence is an evidence category, not a probability.\",\"Unknowns remain explicit; findings never authorize writes.\","
-        "\"Provided text signals do not prove current runtime faults.\"],\"findings\":"+items+"}";
+        "\"Provided text signals do not prove current runtime faults.\"],\"findings\":"+items+sampling+"}";
 }

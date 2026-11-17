@@ -13,7 +13,7 @@ commands, extra arguments, write verbs, URLs, config and server/MCP flags fail w
 exit code 2 before collecting data. Exit 0 means collection completed with process
 enumeration success; individual unavailable metrics still remain unknown. Exit 3
 means process enumeration failed; inspect JSON unknown/completeness fields rather
-than treating missing entries as exited/zero. Exit 4 reports stdout failure. Output is ASCII-escaped JSON v1.
+than treating missing entries as exited/zero. Exit 4 reports stdout failure. Output is ASCII-escaped JSON v1. Both CLI commands include top-level `sampling` completeness and exact-string timestamps.
 
 The binary takes two local samples separated by 100ms for CPU/I/O deltas and bounded
 resource observations. It does not start the GUI, launch child commands, read user

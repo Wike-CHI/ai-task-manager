@@ -41,7 +41,7 @@ int wmain(int argc,wchar_t** argv) {
     snapshot.resourceEvents=events.events; snapshot.resourceEventState=events.state;
     snapshot.resourceEventsOmitted=events.omitted;
     if(command==ReadOnlyCommand::Snapshot) std::cout<<SerializeSnapshotJson(snapshot)<<'\n';
-    else std::cout<<SerializeFindingsJson(BuildDiagnosticFindings(snapshot))<<'\n';
+    else std::cout<<SerializeFindingsJson(BuildDiagnosticFindings(snapshot), &snapshot)<<'\n';
     if(!std::cout) return 4;
     return snapshot.processEnumerationComplete ? 0 : 3;
 }
