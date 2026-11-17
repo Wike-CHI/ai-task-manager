@@ -1,0 +1,207 @@
+#pragma once
+#include "types.h"
+#include "workloads.h"
+#include "policy.h"
+#include "format.h"
+struct DiagnosticContext {
+    const Sample* history;
+    int historyCount, historyHead, historyCapacity;
+    double gpuTemp, fan, diskTemp, cpuTemp, weightsGB;
+};
+static std::wstring RiskTag(Risk r) {
+    switch (r) {
+    case RISK_PROTECTED: return L"勿动";
+    case RISK_MODEL:     return L"模型";
+    case RISK_SAFE:      return L"可关";
+    case RISK_CAREFUL:   return L"慎关";
+    default:             return L"";
+    }
+}
+
+static std::wstring TrendText(const DiagnosticContext& ctx) {
+    if (ctx.historyCount < 10) return L"（样本还不够，稍等半分钟）";
+    auto at = [&](int back) {
+        int idx = (ctx.historyHead - 1 - back + ctx.historyCapacity * 2) % ctx.historyCapacity;
+        return ctx.history[idx];
+    };
+    double recent = 0, older = 0;
+    for (int i = 0; i < 5; ++i) recent += at(i).com;
+    for (int i = 5; i < 10; ++i) older += at(i).com;
+    recent /= 5; older /= 5;
+    double d = recent - older;
+    if (d > 1.5) return Fmt(L"提交 30 秒内上升 %.0f%%，还在恶化", d);
+    if (d < -1.5) return Fmt(L"提交 30 秒内下降 %.0f%%，在缓解", -d);
+    return L"提交最近 30 秒基本持平";
+}
+
+static std::wstring TempTrendText(const DiagnosticContext& ctx) {
+    if (ctx.historyCount < 12 || ctx.gpuTemp <= 0) return L"";
+    auto at = [&](int back) {
+        int idx = (ctx.historyHead - 1 - back + ctx.historyCapacity * 2) % ctx.historyCapacity;
+        return ctx.history[idx];
+    };
+    double now = ctx.gpuTemp, before = at(10).gpuT;   // 约 20 秒前
+    if (before <= 0) return L"";
+    double d = now - before;
+    if (d >= 2) return Fmt(L"（GPU 20 秒内升 %.0f°C，%.0f→%.0f）", d, before, now);
+    if (d <= -2) return Fmt(L"（GPU 20 秒内降 %.0f°C，%.0f→%.0f）", -d, before, now);
+    return L"（GPU 温度平稳）";
+}
+
+static std::wstring Diagnose(const Snapshot& s, const DiagnosticContext& ctx) {
+    std::wstring out;
+    bool ramHigh = s.ramPct >= 88;
+    bool comHigh = s.comPct >= 85;
+    bool vramHigh = s.hasGpu && s.vramTotal > 0 && s.vramUsed / s.vramTotal > 0.92;
+
+    if (comHigh || ramHigh) {
+        out += L"结论：内存压力较高；是否换页导致卡顿仍需磁盘/硬缺页证据。\r\n\r\n";
+        out += Fmt(L"· 物理内存 %.1f / %.1f GB（%.0f%%）\r\n", s.ramUsedGB, s.ramTotalGB, s.ramPct);
+        out += Fmt(L"· 提交内存 %.1f / %.1f GB（%.0f%%）\r\n", s.comUsedGB, s.comTotalGB, s.comPct);
+        out += L"· 提交接近上限提示分配失败风险；仅凭使用率不能断定正在换页。";
+        out += TrendText(ctx) + L"\r\n";
+    } else if (vramHigh) {
+        out += L"结论：显存接近打满，模型推理变慢，但打字不会卡。\r\n\r\n";
+        out += Fmt(L"· 显存 %.1f / %.1f GB（%.0f%%）\r\n",
+                   s.vramUsed, s.vramTotal, s.vramUsed / s.vramTotal * 100);
+    } else {
+        out += L"结论：资源正常，没看到明显瓶颈。\r\n\r\n";
+        out += Fmt(L"· 内存 %.1f / %.1f GB（%.0f%%），提交 %.1f / %.1f GB（%.0f%%）\r\n",
+                   s.ramUsedGB, s.ramTotalGB, s.ramPct, s.comUsedGB, s.comTotalGB, s.comPct);
+    }
+
+    if (s.hasGpu)
+        out += Fmt(L"· GPU %.0f%%，显存 %.1f / %.1f GB，CPU %.0f%%\r\n",
+                   s.gpuUtil, s.vramUsed, s.vramTotal, s.cpuPct);
+    else
+        out += Fmt(L"· CPU %.0f%%（没有检测到 N 卡）\r\n", s.cpuPct);
+
+    if (ctx.gpuTemp > 0) {
+        out += Fmt(L"· 温度：GPU %.0f°C（风扇 %.0f%%）", ctx.gpuTemp, ctx.fan);
+        if (ctx.diskTemp > 0) out += Fmt(L"，磁盘 %.0f°C", ctx.diskTemp);
+        if (ctx.cpuTemp > 0) out += Fmt(L"，ACPI %.0f°C", ctx.cpuTemp);
+        out += TempTrendText(ctx);
+        out += L"\r\n";
+
+        if (ctx.gpuTemp >= 83 && ctx.fan >= 85)
+            out += L"  ⚠ 显卡高温 + 高转速同时出现，散热可能受阻（积灰 / 风道 / 环境温度）\r\n";
+        else if (ctx.gpuTemp >= 83)
+            out += L"  ⚠ 显卡温度偏高而风扇未拉满，可检查风扇曲线\r\n";
+        else if (ctx.fan >= 90 && ctx.gpuTemp < 60)
+            out += L"  散热余量充足（风扇高转速但温度低）\r\n";
+    }
+
+    out += L"\r\n内存前 5：\r\n";
+    int n = 0;
+    for (auto& r : s.rows) {
+        if (n++ >= 5) break;
+        std::wstring tag = RiskTag(r.risk);
+        out += Fmt(L"· %s —— %.1f GB（%d 个进程）%s\r\n", r.name.c_str(), r.memMB / 1024.0, r.count,
+                   tag.empty() ? L"" : (L"[" + tag + L"]").c_str());
+    }
+
+    out += L"\r\n建议（按释放量）：\r\n";
+    int idx = 1;
+    double gain = 0;
+    for (auto& r : s.rows) {
+        if (r.risk != RISK_SAFE || r.memMB < 80) continue;
+        if (idx > 4) break;
+        out += Fmt(L"%d. 关掉 %s —— 释放 %.1f GB（%s）\r\n",
+                   idx++, r.name.c_str(), r.memMB / 1024.0, r.why.c_str());
+        gain += r.memMB;
+    }
+    for (auto& r : s.rows) {
+        if (r.risk != RISK_CAREFUL || r.memMB < 300) continue;
+        out += Fmt(L"   谨慎：%s —— %.1f GB（%s）\r\n", r.name.c_str(), r.memMB / 1024.0, r.why.c_str());
+        break;
+    }
+    if (gain > 200)
+        out += Fmt(L"\r\n候选工作集合计 %.1f GB；共享页可能重复，不能推算提交下降量。\r\n",
+                   gain / 1024.0);
+
+    if (s.modelRunning)
+        out += Fmt(L"\r\n模型在跑：显存 %.1f GB · 内存 %.2f GB · 权重 %.1f GB，别按内存大小误杀。\r\n",
+                   s.vramUsed, s.modelMemGB, ctx.weightsGB);
+    return out;
+}
+
+static std::wstring WorkloadReport(const Snapshot& s) {
+    std::wstring out = L"开发者工作负载（父子关系 + 名称启发式，不代表项目/任务身份）：\r\n";
+    const auto workloads = AttributeWorkloads(s.processes);
+    for (const auto& w : workloads)
+        out += Fmt(L"· %s root PID %u：%u 个进程，工作集 %.1f MB，CPU %.1f%%\r\n",
+            w.kind.c_str(), w.rootPid, (unsigned)w.members.size(), w.memMB, w.cpuPct);
+    if (workloads.empty()) out += L"未发现可归因工作负载。\r\n";
+    out += L"\r\n进程树边（PID → 父 PID；缺失/创建时间未知/父进程较新均不关联）：\r\n";
+    std::map<uint32_t, const ProcessNode*> index;
+    for (const auto& n : s.processes) index[n.identity.pid] = &n;
+    for (const auto& n : s.processes) {
+        const auto* parent = VerifiedParent(n, index);
+        out += Fmt(L"%s [%u] → %u%s\r\n", n.identity.image.c_str(), n.identity.pid,
+            n.parentPid, parent ? L"" : L"（未验证）");
+    }
+    out += L"工作集含共享页，求和不是可释放内存；不采集命令行或凭据。";
+    return out;
+}
+
+static std::wstring DiagnoseQuestion(const std::wstring& q, const Snapshot& s, const DiagnosticContext& ctx) {
+    std::wstring low = Lower(q);
+    auto has = [&](const wchar_t* k) { return low.find(k) != std::wstring::npos; };
+
+    if (has(L"开发") || has(L"进程树") || has(L"归因") || has(L"workload")) return WorkloadReport(s);
+    if (has(L"模型")) {
+        if (!s.modelRunning) return L"翻译模型当前没在跑（找不到 llama-server 进程）。";
+        return Fmt(L"模型占用：\r\n\r\n· 显存 %.1f / %.1f GB（含 KV 缓存）\r\n"
+                   L"· 进程内存 %.2f GB\r\n· 权重文件 %.1f GB（磁盘）\r\n\r\n"
+                   L"它吃的是显存，内存占比不高——按内存排序会排第一，别误杀。",
+                   s.vramUsed, s.vramTotal, s.modelMemGB, ctx.weightsGB);
+    }
+    if (has(L"显存") || has(L"gpu") || has(L"显卡")) {
+        if (!s.hasGpu) return L"没有检测到 NVIDIA 显卡（nvidia-smi 不可用）。";
+        return Fmt(L"GPU 利用率 %.0f%%，显存 %.1f / %.1f GB（%.0f%%），温度 %.0f°C。\r\n\r\n"
+                   L"显存大头是翻译模型。超过 92%% 时推理会变慢，但不会影响打字——打字卡是内存换页。",
+                   s.gpuUtil, s.vramUsed, s.vramTotal,
+                   s.vramTotal > 0 ? s.vramUsed / s.vramTotal * 100 : 0, s.gpuTemp);
+    }
+    if (has(L"关") || has(L"清理") || has(L"释放") || has(L"杀")) {
+        std::wstring out = L"按「关掉基本无损」排序：\r\n\r\n";
+        double gain = 0;
+        int i = 1;
+        for (auto& r : s.rows) {
+            if (r.risk != RISK_SAFE) continue;
+            out += Fmt(L"%d. %s —— %.1f GB，%d 个进程\r\n   %s\r\n",
+                       i++, r.name.c_str(), r.memMB / 1024.0, r.count, r.why.c_str());
+            gain += r.memMB;
+        }
+        if (i == 1) out += L"• 目前没有标记为「可关」的进程。\r\n";
+        out += Fmt(L"\r\n合计可释放 %.1f GB。点「执行建议」可以关（先列清单确认，再逐个核对进程身份）。", gain / 1024.0);
+        return out;
+    }
+    if (has(L"风扇") || has(L"散热") || has(L"温度")) {
+        std::wstring out = L"当前温度：\r\n\r\n";
+        if (ctx.gpuTemp > 0)
+            out += Fmt(L"· GPU %.0f°C，风扇 %.0f%%\r\n", ctx.gpuTemp, ctx.fan);
+        if (ctx.diskTemp > 0) out += Fmt(L"· NVMe %.0f°C\r\n", ctx.diskTemp);
+        if (ctx.cpuTemp > 0) out += Fmt(L"· ACPI 热区 %.0f°C（主板/机箱附近，不是核心温度）\r\n", ctx.cpuTemp);
+
+        out += L"\r\n关于控制风扇：\r\n"
+               L"· GPU：Windows 下 nvidia-smi 只能读不能写（本机确认无 --fan-speed），"
+               L"要改转速得用 NVIDIA 控制面板或 MSI Afterburner。\r\n"
+               L"· 主板/CPU 风扇：没有标准接口，得用厂商工具（华硕 AI Suite、微星 Center、"
+               L"联想 Vantage）或进 BIOS 调风扇曲线。\r\n"
+               L"· 通用做法要装内核驱动直接读写 Super I/O（如 WinRing0），"
+               L"这类驱动会被杀软拦、也有蓝屏风险，本工具不做。\r\n";
+        return out;
+    }
+    if (has(L"内存") || has(L"卡") || has(L"慢") || has(L"为什么")) return Diagnose(s, ctx);
+    if (has(L"趋势") || has(L"曲线") || has(L"历史"))
+        return Fmt(L"曲线保留最近 %d 个点（约 %d 秒）：绿色=内存，黄色=提交，蓝色=显存。\r\n当前趋势：%s",
+                   ctx.historyCount, ctx.historyCount * 2, TrendText(ctx).c_str());
+    if (has(L"磁盘") || has(L"io"))
+        return L"磁盘 IO 没单独采样。判断是否换页看「提交」和曲线：提交逼近上限时系统会把内存页写回磁盘，整机变卡。";
+    if (has(L"进程") || has(L"多少"))
+        return Fmt(L"当前 %d 个进程，合并同名后 %d 项，内存总量 %.1f GB。",
+                   s.procCount, (int)s.rows.size(), s.ramUsedGB);
+    return Diagnose(s, ctx);
+}
+

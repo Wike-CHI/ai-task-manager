@@ -34,6 +34,26 @@ jobs:
              /Fe:AITaskManager.exe ^
              user32.lib gdi32.lib comctl32.lib psapi.lib shell32.lib dwmapi.lib msimg32.lib advapi32.lib
 
+      - name: Core and safety tests
+        shell: cmd
+        run: |
+          cl /nologo /std:c++17 /EHsc /O2 /utf-8 /W3 /Fo:build\ tools\core_selftest.cpp /Fe:build\core_selftest.exe
+          if errorlevel 1 exit /b 1
+          build\core_selftest.exe
+          if errorlevel 1 exit /b 1
+          cl /nologo /std:c++17 /EHsc /O2 /utf-8 /W3 /Fo:build\ tools\safety_selftest.cpp /Fe:build\safety_selftest.exe
+          if errorlevel 1 exit /b 1
+          build\safety_selftest.exe
+          if errorlevel 1 exit /b 1
+
+      - name: Benchmark harness smoke test (not a product comparison)
+        shell: pwsh
+        run: |
+          $hash = (Get-FileHash (Get-Process -Id $PID).Path).Hash
+          ./tools/benchmark.ps1 -ProcessId $PID -Label AITaskManager -ExpectedSha256 $hash -Revision harness-smoke -Scenario self -OutputDirectory build/bench-a -Samples 10 -IntervalMs 100
+          ./tools/benchmark.ps1 -ProcessId $PID -Label Argus -ExpectedSha256 $hash -Revision harness-smoke -Scenario self -OutputDirectory build/bench-b -Samples 10 -IntervalMs 100
+          ./tools/benchmark-compare.ps1 -AITaskManagerDirectory build/bench-a -ArgusDirectory build/bench-b
+
       - name: Show artifact
         shell: pwsh
         run: |

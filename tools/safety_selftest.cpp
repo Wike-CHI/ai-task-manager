@@ -38,6 +38,8 @@ static ProcIdent IdentOf(DWORD pid, const wchar_t* image) {
     id.image = image;
     HANDLE h = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, FALSE, pid);
     if (h) {
+        wchar_t path[32768]{}; DWORD n = 32768;
+        if (QueryFullProcessImageNameW(h, 0, path, &n)) id.path = Lower(path);
         FILETIME c{}, e{}, k{}, u{};
         if (GetProcessTimes(h, &c, &e, &k, &u)) id.start = FileTimeToU64(c);
         CloseHandle(h);
@@ -131,6 +133,19 @@ int wmain() {
         KillReport r = KillPids({ id });
         Check(r.killed == 0 && r.gone == 1, L"已退出的目标记为 gone",
               Fmt(L"killed=%d gone=%d", r.killed, r.gone));
+    }
+
+    {
+        DWORD pid = 0;
+        if (!SpawnSleeper(pid)) return 1;
+        ProcIdent id = IdentOf(pid, L"ping.exe");
+        id.path += L".different";
+        auto r = KillPids({id});
+        Check(r.skipped == 1 && StillAlive(pid), L"完整路径不一致时拒绝结束");
+        id = IdentOf(pid, L"csrss.exe");
+        r = KillPids({id});
+        Check(r.skipped == 1 && StillAlive(pid), L"执行层拦截保护名称");
+        KillRaw(pid);
     }
 
     wprintf(L"\n%s（失败 %d 项）\n", g_fail ? L"存在失败用例" : L"全部通过", g_fail);
