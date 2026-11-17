@@ -80,8 +80,9 @@ correlation remain work in progress.
 ## Distribution status
 
 CI artifacts are unsigned test builds, not Stable/Nightly releases. There is no
-installer/signing/provenance guarantee yet. The existing main-push workflow can
-publish automatically: merging is not a harmless release-neutral action.
+installer/signing/provenance guarantee yet. The existing main workflow outside this Draft PR chain can publish automatically.
+This branch replaces its publisher with read-only [artifact candidate channels](docs/p3-artifact-channels.md);
+that change is not yet merged or active on main.
 [P3 readiness and proposed channels](docs/p3-readiness.md) document the changes and
 approvals still required. This branch does not alter repository settings, publish a
 release, configure signing credentials or merge any PR.

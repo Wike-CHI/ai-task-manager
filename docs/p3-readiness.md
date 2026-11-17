@@ -2,7 +2,11 @@
 
 ## Current and proposed channels
 
-Current: development PR checks and unsigned CI artifacts. The existing build workflow
+See [artifact candidate channels](p3-artifact-channels.md) for the subsequent implementation
+in this Draft branch. It removes publishing here but has not changed main. The following
+readiness gates remain applicable.
+
+Baseline before that patch: development PR checks and unsigned CI artifacts. The existing build workflow
 also publishes from main pushes. No Stable/Nightly separation is active. This document
 **does not change that workflow or repository settings**.
 
