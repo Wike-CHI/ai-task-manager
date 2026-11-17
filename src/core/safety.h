@@ -135,12 +135,18 @@ struct CloseWindowContext { HANDLE process; const ProcIdent* identity; int poste
 static BOOL CALLBACK PostVerifiedClose(HWND window, LPARAM data) {
     auto& ctx = *reinterpret_cast<CloseWindowContext*>(data);
     DWORD pid = 0;
-    GetWindowThreadProcessId(window, &pid);
-    if (pid != ctx.identity->pid) return TRUE;
+    const DWORD thread = GetWindowThreadProcessId(window, &pid);
+    if (!thread || pid != ctx.identity->pid) return TRUE;
     std::wstring why;
     // Keep the process handle alive while discovering and messaging its windows.
     if (WaitForSingleObject(ctx.process, 0) != WAIT_TIMEOUT ||
         !VerifyIdentity(ctx.process, *ctx.identity, why)) return TRUE;
+    // HWNDs can be recycled independently of retained process handles. Recheck
+    // both owner identifiers after identity I/O, immediately before posting.
+    // Win32 provides no atomic external HWND ownership lock; this is best-effort.
+    DWORD currentPid = 0;
+    const DWORD currentThread = GetWindowThreadProcessId(window, &currentPid);
+    if (currentPid != pid || currentThread != thread) return TRUE;
     if (PostMessageW(window, WM_CLOSE, 0, 0)) ++ctx.posted;
     return TRUE;
 }
@@ -195,7 +201,7 @@ static void MergeKillReport(KillReport& dst, const KillReport& src) {
 }
 
 static std::wstring KillSummary(const KillReport& rep) {
-    std::wstring s = Fmt(L"正常退出 %d 个，强制结束 %d 个", rep.closed, rep.killed);
+    std::wstring s = Fmt(L"观察到退出 %d 个，强制结束 %d 个", rep.closed, rep.killed);
     if (rep.kept) s += Fmt(L"，%d 个保留运行（未授权强制）", rep.kept);
     if (rep.pending) s += Fmt(L"，%d 个已请求终止但退出待确认", rep.pending);
     if (rep.gone)    s += Fmt(L"，%d 个已自行退出", rep.gone);

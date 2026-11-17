@@ -7,7 +7,7 @@
 - No executable name grants default batch-safe termination. Reasons disclose name heuristics.
 - Default action requests WM_CLOSE and observes up to a shared 1.5s budget. Missing window/unsaved prompts/non-cooperation does not authorize force. Separate default-No approval is required for remaining frozen identities; force then revalidates them. Normal exits cannot be rolled back by cancelling the later force stage.
 - Work-set trimming is removed, not silently enabled through another entry point.
-- Windows automated helper tests do not replace real multi-theme GUI/save-dialog acceptance. HWND messaging is the standard best-effort Win32 close mechanism, not an atomic process termination transaction; process handles are retained and window ownership is checked immediately before posting.
+- Windows automated helper tests do not replace real multi-theme GUI/save-dialog acceptance. HWND messaging is the standard best-effort Win32 close mechanism, not an atomic process termination transaction; process handles are retained and window owner PID/thread are checked again immediately before posting. Windows provides no atomic external HWND ownership lock, so HWND reuse between that check and posting remains a platform limitation; this is not presented as fully eliminated.
 
 ## P1 next: deterministic diagnostic foundations
 
