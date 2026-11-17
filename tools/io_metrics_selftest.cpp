@@ -1,5 +1,6 @@
 #include "../src/core/io_metrics.h"
 #include "../src/core/io_evidence.h"
+#include "../src/core/diagnostic_query.h"
 #include <iostream>
 #include <limits>
 
@@ -52,6 +53,15 @@ int main() {
     Snapshot snapshot; snapshot.processes.push_back(node); snapshot.processes.push_back(ProcessNode{});
     const auto report = ProcessIoReport(snapshot);
     check(report.find(L"有效 1，未知 1") != std::wstring::npos, "report counts unavailable processes without inventing zero rates");
+    check(RouteDiagnosticQuery(L"GPU allocation failure") == DiagnosticQueryRoute::Evidence,
+          "allocation is not mistaken for IO token");
+    check(RouteDiagnosticQuery(L"IO 诊断 OOM") == DiagnosticQueryRoute::Evidence,
+          "explicit diagnosis outranks IO query");
+    check(RouteDiagnosticQuery(L"show I/O") == DiagnosticQueryRoute::ProcessIo &&
+          RouteDiagnosticQuery(L"IO") == DiagnosticQueryRoute::ProcessIo,
+          "standalone IO aliases remain supported");
+    check(RouteDiagnosticQuery(L"version") == DiagnosticQueryRoute::Other,
+          "arbitrary words containing io do not route to IO");
     std::cout << cases << " process-I/O checks, " << failures << " failures (not physical disk or hard faults)\n";
     return failures ? 1 : 0;
 }

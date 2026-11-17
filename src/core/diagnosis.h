@@ -5,6 +5,7 @@
 #include "format.h"
 #include "diagnostic_evidence.h"
 #include "io_evidence.h"
+#include "diagnostic_query.h"
 struct DiagnosticContext {
     const Sample* history;
     int historyCount, historyHead, historyCapacity;
@@ -125,10 +126,9 @@ static std::wstring DiagnoseQuestion(const std::wstring& q, const Snapshot& s, c
     std::wstring low = Lower(q);
     auto has = [&](const wchar_t* k) { return low.find(k) != std::wstring::npos; };
 
-    if (has(L"io") || has(L"磁盘")) return ProcessIoReport(s);
-
-    if (has(L"证据") || has(L"诊断") || has(L"oom") || has(L"端口") || has(L"异常"))
-        return RenderDiagnosticFindings(BuildDiagnosticFindings(s));
+    const auto route = RouteDiagnosticQuery(q);
+    if (route == DiagnosticQueryRoute::Evidence) return RenderDiagnosticFindings(BuildDiagnosticFindings(s));
+    if (route == DiagnosticQueryRoute::ProcessIo) return ProcessIoReport(s);
 
     if (has(L"开发") || has(L"进程树") || has(L"归因") || has(L"workload")) return WorkloadReport(s);
     if (has(L"模型")) {
