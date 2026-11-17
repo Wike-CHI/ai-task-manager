@@ -96,41 +96,7 @@ static COLORREF C_AMBER        = RGB(224, 161, 58);
 static COLORREF C_RED          = RGB(224, 85, 85);
 static COLORREF C_BLUE         = RGB(77, 157, 224);
 
-enum Risk { RISK_PROTECTED, RISK_MODEL, RISK_SAFE, RISK_CAREFUL, RISK_NORMAL };
-
-// 进程身份。pid 只是编号：进程退出后系统会把这个号发给新进程，
-// 而快照到用户点「结束」之间隔着几秒，光凭 pid 下手可能杀到刚复用了这个号的新进程。
-// 所以连创建时间和映像名一起记下来，动手前再核一遍。
-struct ProcIdent {
-    DWORD        pid   = 0;
-    ULONGLONG    start = 0;     // 创建时间；0 = 快照时打不开，身份未知，后面一律不杀
-    std::wstring image;         // 快照时的映像名（小写）
-};
-
-struct ProcRow {
-    std::wstring name;
-    int    count = 0;
-    double memMB = 0;
-    double cpuPct = 0;
-    int    ageMin = 0;
-    Risk   risk = RISK_NORMAL;
-    std::wstring why;
-    std::vector<ProcIdent> pids;
-};
-
-struct Sample { double ram, com, vram, gpu, gpuT, cpuT, fan; };
-
-struct Snapshot {
-    double ramUsedGB = 0, ramTotalGB = 0, ramPct = 0;
-    double comUsedGB = 0, comTotalGB = 0, comPct = 0;
-    double cpuPct = 0;
-    int    procCount = 0;
-    bool   hasGpu = false;
-    double gpuUtil = 0, vramUsed = 0, vramTotal = 0, gpuTemp = 0;
-    double modelMemGB = 0;
-    bool   modelRunning = false;
-    std::vector<ProcRow> rows;
-};
+#include "core/types.h"
 
 static Snapshot g_snap;
 static CRITICAL_SECTION g_lock;
@@ -154,50 +120,9 @@ static void TrayRemove();
 static void ShowFromTray(HWND hwnd);
 static void HideToTray(HWND hwnd);
 
-static const std::map<std::wstring, std::pair<Risk, const wchar_t*>> RISK_TABLE = {
-    { L"system",              { RISK_PROTECTED, L"系统进程" } },
-    { L"registry",            { RISK_PROTECTED, L"系统进程" } },
-    { L"memory compression",  { RISK_PROTECTED, L"系统进程" } },
-    { L"csrss.exe",           { RISK_PROTECTED, L"系统关键进程" } },
-    { L"wininit.exe",         { RISK_PROTECTED, L"系统关键进程" } },
-    { L"winlogon.exe",        { RISK_PROTECTED, L"系统关键进程" } },
-    { L"services.exe",        { RISK_PROTECTED, L"系统关键进程" } },
-    { L"lsass.exe",           { RISK_PROTECTED, L"系统关键进程" } },
-    { L"smss.exe",            { RISK_PROTECTED, L"系统关键进程" } },
-    { L"dwm.exe",             { RISK_PROTECTED, L"桌面合成器" } },
-    { L"explorer.exe",        { RISK_PROTECTED, L"桌面外壳" } },
-    { L"svchost.exe",         { RISK_PROTECTED, L"系统服务宿主" } },
-    { L"msmpeng.exe",         { RISK_PROTECTED, L"Defender 引擎" } },
-    { L"pythonw.exe",         { RISK_PROTECTED, L"本程序" } },
-    { L"llama-server.exe",    { RISK_MODEL,     L"翻译模型，占显存不占内存" } },
-    { L"chatgpt.exe",         { RISK_SAFE,      L"对话在云端，重开无损" } },
-    { L"qoderwake-cn.exe",    { RISK_SAFE,      L"后台守护，用到时自恢复" } },
-    { L"feishu.exe",          { RISK_SAFE,      L"消息会同步，重开不丢" } },
-    { L"wxwork.exe",          { RISK_SAFE,      L"消息会同步，重开不丢" } },
-    { L"wechatappex.exe",     { RISK_SAFE,      L"小程序容器，可重开" } },
-    { L"msedgewebview2.exe",  { RISK_SAFE,      L"内嵌浏览器，随宿主退出" } },
-    { L"codex.exe",           { RISK_SAFE,      L"命令行 agent 宿主" } },
-    { L"code.exe",            { RISK_CAREFUL,   L"VS Code，可能有未保存文件" } },
-    { L"qoderclicn-1.1.81.exe", { RISK_CAREFUL, L"Qoder IDE，可能有未保存文件" } },
-    { L"cursor.exe",          { RISK_CAREFUL,   L"Cursor，可能有未保存文件" } },
-    { L"workbuddy.exe",       { RISK_CAREFUL,   L"WorkBuddy，可能正在跑任务" } },
-    { L"chrome.exe",          { RISK_CAREFUL,   L"浏览器标签会丢" } },
-    { L"msedge.exe",          { RISK_CAREFUL,   L"浏览器标签会丢" } },
-};
+#include "core/policy.h"
 
-static std::wstring Lower(std::wstring s) {
-    for (auto& c : s) c = (wchar_t)towlower(c);
-    return s;
-}
-
-static std::wstring Fmt(const wchar_t* f, ...) {
-    wchar_t buf[1024]{};
-    va_list ap;
-    va_start(ap, f);
-    _vsnwprintf_s(buf, 1024, _TRUNCATE, f, ap);
-    va_end(ap);
-    return buf;
-}
+#include "core/format.h"
 
 static void RunHidden(const std::wstring& cmd, std::wstring& out) {
     SECURITY_ATTRIBUTES sa{ sizeof(sa), nullptr, TRUE };
@@ -334,14 +259,7 @@ static double WeightsGB() {
     return cached;
 }
 
-static ULONGLONG FileTimeToU64(const FILETIME& ft) {
-    ULARGE_INTEGER u;
-    u.LowPart = ft.dwLowDateTime;
-    u.HighPart = ft.dwHighDateTime;
-    return u.QuadPart;
-}
-
-struct CpuSample { ULONGLONG kernel, user; };
+#include "core/collector.h"
 
 static void Collect(Snapshot& s) {
     MEMORYSTATUSEX ms{};
@@ -377,403 +295,23 @@ static void Collect(Snapshot& s) {
     s.modelRunning = false;
     s.modelMemGB = 0;
 
-    static std::map<DWORD, CpuSample> prevCpu;
-    std::map<DWORD, CpuSample> curCpu;
-    std::map<std::wstring, ProcRow> groups;
-
-    HANDLE snap = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0);
-    if (snap != INVALID_HANDLE_VALUE) {
-        PROCESSENTRY32W pe{};
-        pe.dwSize = sizeof(pe);
-        int count = 0;
-        if (Process32FirstW(snap, &pe)) {
-            do {
-                count++;
-                std::wstring name = pe.szExeFile;
-                std::wstring key = Lower(name);
-                DWORD pid = pe.th32ProcessID;
-
-                auto& row = groups[key];
-                row.name = name;
-                row.count++;
-                row.pids.push_back(ProcIdent{ pid, 0, key });
-
-                HANDLE h = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION | PROCESS_VM_READ, FALSE, pid);
-                if (!h) continue;   // 打不开就留着 start=0，结束前会因身份未知跳过
-
-                FILETIME ct{}, et{}, kt{}, ut{};
-                if (GetProcessTimes(h, &ct, &et, &kt, &ut)) {
-                    row.pids.back().start = FileTimeToU64(ct);
-                    CpuSample now{ FileTimeToU64(kt), FileTimeToU64(ut) };
-                    curCpu[pid] = now;
-                    auto it = prevCpu.find(pid);
-                    if (it != prevCpu.end()) {
-                        double ds = (double)((now.kernel - it->second.kernel) +
-                                             (now.user - it->second.user)) / 10000000.0;
-                        if (ds > 0 && ds < 120) row.cpuPct += ds;
-                    }
-                }
-
-                PROCESS_MEMORY_COUNTERS_EX pmc{};
-                if (GetProcessMemoryInfo(h, (PROCESS_MEMORY_COUNTERS*)&pmc, sizeof(pmc))) {
-                    double mb = pmc.WorkingSetSize / 1048576.0;
-                    row.memMB += mb;
-                    if (key == L"llama-server.exe") {
-                        s.modelRunning = true;
-                        s.modelMemGB += mb / 1024.0;
-                    }
-                }
-                CloseHandle(h);
-            } while (Process32NextW(snap, &pe));
-        }
-        CloseHandle(snap);
-        s.procCount = count;
-    }
-    prevCpu.swap(curCpu);
-
-    s.rows.clear();
-    for (auto& kv : groups) {
-        ProcRow r = kv.second;
-        auto it = RISK_TABLE.find(kv.first);
-        if (it != RISK_TABLE.end()) {
-            r.risk = it->second.first;
-            r.why = it->second.second;
-        }
-        s.rows.push_back(r);
-    }
-
-    // 本程序自己也在进程表里。RISK_TABLE 里写死的 exe 名不一定对得上（换个名字编译就漏了），
-    // 直接按 pid 认：谁身上带着自己的 pid，谁就是「本程序」，不允许被结束。
-    const DWORD selfPid = GetCurrentProcessId();
-    for (auto& r : s.rows) {
-        for (const auto& p : r.pids) {
-            if (p.pid == selfPid) { r.risk = RISK_PROTECTED; r.why = L"本程序"; break; }
-        }
-    }
-
-    std::sort(s.rows.begin(), s.rows.end(),
-              [](const ProcRow& a, const ProcRow& b) { return a.memMB > b.memMB; });
+    CollectProcesses(s);
 }
 
-static std::wstring RiskTag(Risk r) {
-    switch (r) {
-    case RISK_PROTECTED: return L"勿动";
-    case RISK_MODEL:     return L"模型";
-    case RISK_SAFE:      return L"可关";
-    case RISK_CAREFUL:   return L"慎关";
-    default:             return L"";
-    }
+#include "core/diagnosis.h"
+static DiagnosticContext DiagnosisContext() {
+    return {g_hist, g_histCount, g_histHead, HIST_MAX,
+        g_temps.gpu, g_temps.fan, g_temps.disk, g_temps.cpu, g_weightsGB};
 }
-
-static std::wstring TrendText() {
-    if (g_histCount < 8) return L"（样本还不够，稍等半分钟）";
-    auto at = [&](int back) {
-        int idx = (g_histHead - 1 - back + HIST_MAX * 2) % HIST_MAX;
-        return g_hist[idx];
-    };
-    double recent = 0, older = 0;
-    for (int i = 0; i < 5; ++i) recent += at(i).com;
-    for (int i = 5; i < 10; ++i) older += at(i).com;
-    recent /= 5; older /= 5;
-    double d = recent - older;
-    if (d > 1.5) return Fmt(L"提交 30 秒内上升 %.0f%%，还在恶化", d);
-    if (d < -1.5) return Fmt(L"提交 30 秒内下降 %.0f%%，在缓解", -d);
-    return L"提交最近 30 秒基本持平";
-}
-
-static std::wstring TempTrendText() {
-    if (g_histCount < 12 || g_temps.gpu <= 0) return L"";
-    auto at = [&](int back) {
-        int idx = (g_histHead - 1 - back + HIST_MAX * 2) % HIST_MAX;
-        return g_hist[idx];
-    };
-    double now = g_temps.gpu, before = at(10).gpuT;   // 约 20 秒前
-    if (before <= 0) return L"";
-    double d = now - before;
-    if (d >= 2) return Fmt(L"（GPU 20 秒内升 %.0f°C，%.0f→%.0f）", d, before, now);
-    if (d <= -2) return Fmt(L"（GPU 20 秒内降 %.0f°C，%.0f→%.0f）", -d, before, now);
-    return L"（GPU 温度平稳）";
-}
-
-static std::wstring AnalyzeWhy(const Snapshot& s) {
-    std::wstring out;
-    bool ramHigh = s.ramPct >= 88;
-    bool comHigh = s.comPct >= 85;
-    bool vramHigh = s.hasGpu && s.vramTotal > 0 && s.vramUsed / s.vramTotal > 0.92;
-
-    if (comHigh || ramHigh) {
-        out += L"结论：内存压力大，整机在被页面文件拖慢。\r\n\r\n";
-        out += Fmt(L"· 物理内存 %.1f / %.1f GB（%.0f%%）\r\n", s.ramUsedGB, s.ramTotalGB, s.ramPct);
-        out += Fmt(L"· 提交内存 %.1f / %.1f GB（%.0f%%）\r\n", s.comUsedGB, s.comTotalGB, s.comPct);
-        out += L"· 提交逼近上限会疯狂换页，表现为打字卡、翻译从 1 秒变几十秒；";
-        out += TrendText() + L"\r\n";
-    } else if (vramHigh) {
-        out += L"结论：显存接近打满，模型推理变慢，但打字不会卡。\r\n\r\n";
-        out += Fmt(L"· 显存 %.1f / %.1f GB（%.0f%%）\r\n",
-                   s.vramUsed, s.vramTotal, s.vramUsed / s.vramTotal * 100);
-    } else {
-        out += L"结论：资源正常，没看到明显瓶颈。\r\n\r\n";
-        out += Fmt(L"· 内存 %.1f / %.1f GB（%.0f%%），提交 %.1f / %.1f GB（%.0f%%）\r\n",
-                   s.ramUsedGB, s.ramTotalGB, s.ramPct, s.comUsedGB, s.comTotalGB, s.comPct);
-    }
-
-    if (s.hasGpu)
-        out += Fmt(L"· GPU %.0f%%，显存 %.1f / %.1f GB，CPU %.0f%%\r\n",
-                   s.gpuUtil, s.vramUsed, s.vramTotal, s.cpuPct);
-    else
-        out += Fmt(L"· CPU %.0f%%（没有检测到 N 卡）\r\n", s.cpuPct);
-
-    if (g_temps.gpu > 0) {
-        out += Fmt(L"· 温度：GPU %.0f°C（风扇 %.0f%%）", g_temps.gpu, g_temps.fan);
-        if (g_temps.disk > 0) out += Fmt(L"，磁盘 %.0f°C", g_temps.disk);
-        if (g_temps.cpu > 0) out += Fmt(L"，ACPI %.0f°C", g_temps.cpu);
-        out += TempTrendText();
-        out += L"\r\n";
-
-        if (g_temps.gpu >= 83 && g_temps.fan >= 85)
-            out += L"  ⚠ 显卡高温 + 高转速同时出现，散热可能受阻（积灰 / 风道 / 环境温度）\r\n";
-        else if (g_temps.gpu >= 83)
-            out += L"  ⚠ 显卡温度偏高而风扇未拉满，可检查风扇曲线\r\n";
-        else if (g_temps.fan >= 90 && g_temps.gpu < 60)
-            out += L"  散热余量充足（风扇高转速但温度低）\r\n";
-    }
-
-    out += L"\r\n内存前 5：\r\n";
-    int n = 0;
-    for (auto& r : s.rows) {
-        if (n++ >= 5) break;
-        std::wstring tag = RiskTag(r.risk);
-        out += Fmt(L"· %s —— %.1f GB（%d 个进程）%s\r\n", r.name.c_str(), r.memMB / 1024.0, r.count,
-                   tag.empty() ? L"" : (L"[" + tag + L"]").c_str());
-    }
-
-    out += L"\r\n建议（按释放量）：\r\n";
-    int idx = 1;
-    double gain = 0;
-    for (auto& r : s.rows) {
-        if (r.risk != RISK_SAFE || r.memMB < 80) continue;
-        if (idx > 4) break;
-        out += Fmt(L"%d. 关掉 %s —— 释放 %.1f GB（%s）\r\n",
-                   idx++, r.name.c_str(), r.memMB / 1024.0, r.why.c_str());
-        gain += r.memMB;
-    }
-    for (auto& r : s.rows) {
-        if (r.risk != RISK_CAREFUL || r.memMB < 300) continue;
-        out += Fmt(L"   谨慎：%s —— %.1f GB（%s）\r\n", r.name.c_str(), r.memMB / 1024.0, r.why.c_str());
-        break;
-    }
-    if (gain > 200)
-        out += Fmt(L"\r\n全关掉预计释放 %.1f GB，提交降到约 %.0f GB。\r\n",
-                   gain / 1024.0, s.comUsedGB - gain / 1024.0);
-
-    if (s.modelRunning)
-        out += Fmt(L"\r\n模型在跑：显存 %.1f GB · 内存 %.2f GB · 权重 %.1f GB，别按内存大小误杀。\r\n",
-                   s.vramUsed, s.modelMemGB, g_weightsGB);
-    return out;
-}
-
+static std::wstring AnalyzeWhy(const Snapshot& s) { return Diagnose(s, DiagnosisContext()); }
 static std::wstring AnswerQuestion(const std::wstring& q, const Snapshot& s) {
-    std::wstring low = Lower(q);
-    auto has = [&](const wchar_t* k) { return low.find(k) != std::wstring::npos; };
-
-    if (has(L"模型")) {
-        if (!s.modelRunning) return L"翻译模型当前没在跑（找不到 llama-server 进程）。";
-        return Fmt(L"模型占用：\r\n\r\n· 显存 %.1f / %.1f GB（含 KV 缓存）\r\n"
-                   L"· 进程内存 %.2f GB\r\n· 权重文件 %.1f GB（磁盘）\r\n\r\n"
-                   L"它吃的是显存，内存占比不高——按内存排序会排第一，别误杀。",
-                   s.vramUsed, s.vramTotal, s.modelMemGB, g_weightsGB);
-    }
-    if (has(L"显存") || has(L"gpu") || has(L"显卡")) {
-        if (!s.hasGpu) return L"没有检测到 NVIDIA 显卡（nvidia-smi 不可用）。";
-        return Fmt(L"GPU 利用率 %.0f%%，显存 %.1f / %.1f GB（%.0f%%），温度 %.0f°C。\r\n\r\n"
-                   L"显存大头是翻译模型。超过 92%% 时推理会变慢，但不会影响打字——打字卡是内存换页。",
-                   s.gpuUtil, s.vramUsed, s.vramTotal,
-                   s.vramTotal > 0 ? s.vramUsed / s.vramTotal * 100 : 0, s.gpuTemp);
-    }
-    if (has(L"关") || has(L"清理") || has(L"释放") || has(L"杀")) {
-        std::wstring out = L"按「关掉基本无损」排序：\r\n\r\n";
-        double gain = 0;
-        int i = 1;
-        for (auto& r : s.rows) {
-            if (r.risk != RISK_SAFE) continue;
-            out += Fmt(L"%d. %s —— %.1f GB，%d 个进程\r\n   %s\r\n",
-                       i++, r.name.c_str(), r.memMB / 1024.0, r.count, r.why.c_str());
-            gain += r.memMB;
-        }
-        if (i == 1) out += L"• 目前没有标记为「可关」的进程。\r\n";
-        out += Fmt(L"\r\n合计可释放 %.1f GB。点「执行建议」可以关（先列清单确认，再逐个核对进程身份）。", gain / 1024.0);
-        return out;
-    }
-    if (has(L"风扇") || has(L"散热") || has(L"温度")) {
-        std::wstring out = L"当前温度：\r\n\r\n";
-        if (g_temps.gpu > 0)
-            out += Fmt(L"· GPU %.0f°C，风扇 %.0f%%\r\n", g_temps.gpu, g_temps.fan);
-        if (g_temps.disk > 0) out += Fmt(L"· NVMe %.0f°C\r\n", g_temps.disk);
-        if (g_temps.cpu > 0) out += Fmt(L"· ACPI 热区 %.0f°C（主板/机箱附近，不是核心温度）\r\n", g_temps.cpu);
-
-        out += L"\r\n关于控制风扇：\r\n"
-               L"· GPU：Windows 下 nvidia-smi 只能读不能写（本机确认无 --fan-speed），"
-               L"要改转速得用 NVIDIA 控制面板或 MSI Afterburner。\r\n"
-               L"· 主板/CPU 风扇：没有标准接口，得用厂商工具（华硕 AI Suite、微星 Center、"
-               L"联想 Vantage）或进 BIOS 调风扇曲线。\r\n"
-               L"· 通用做法要装内核驱动直接读写 Super I/O（如 WinRing0），"
-               L"这类驱动会被杀软拦、也有蓝屏风险，本工具不做。\r\n";
-        return out;
-    }
-    if (has(L"内存") || has(L"卡") || has(L"慢") || has(L"为什么")) return AnalyzeWhy(s);
-    if (has(L"趋势") || has(L"曲线") || has(L"历史"))
-        return Fmt(L"曲线保留最近 %d 个点（约 %d 秒）：绿色=内存，黄色=提交，蓝色=显存。\r\n当前趋势：%s",
-                   g_histCount, g_histCount * 2, TrendText().c_str());
-    if (has(L"磁盘") || has(L"io"))
-        return L"磁盘 IO 没单独采样。判断是否换页看「提交」和曲线：提交逼近上限时系统会把内存页写回磁盘，整机变卡。";
-    if (has(L"进程") || has(L"多少"))
-        return Fmt(L"当前 %d 个进程，合并同名后 %d 项，内存总量 %.1f GB。",
-                   s.procCount, (int)s.rows.size(), s.ramUsedGB);
-    return AnalyzeWhy(s);
+    return DiagnoseQuestion(q, s, DiagnosisContext());
 }
+static std::wstring TrendText() { return TrendText(DiagnosisContext()); }
 
 // ------------------------------------------------------------------ 结束进程
 // 原则：先核对身份，再动手；核对不了就当它不是目标。
-struct KillReport {
-    int killed = 0;      // 真结束了
-    int gone = 0;        // 动手前自己退出了，无需处理
-    int skipped = 0;     // 身份对不上 / 系统关键进程，主动放过
-    int failed = 0;      // 有权限但没结束成功
-    std::wstring detail;
-};
-
-// IsProcessCritical 是 Win8.1 才导出的，动态取一下；取不到就只靠名字表兜着
-static bool IsCriticalProcess(HANDLE h) {
-    using Fn = BOOL (WINAPI*)(HANDLE, PBOOL);
-    static Fn fn = (Fn)(void*)GetProcAddress(GetModuleHandleW(L"kernel32.dll"), "IsProcessCritical");
-    if (!fn) return false;
-    BOOL critical = FALSE;
-    return fn(h, &critical) && critical;
-}
-
-// 校验的是「这个句柄指向的进程」是否还是快照里那一个：创建时间必须一致，映像名也要一致。
-// 时间对不上说明 pid 已被复用，名字对不上说明记录本身就串了——两种情况都不许杀。
-static bool VerifyIdentity(HANDLE h, const ProcIdent& want, std::wstring& why) {
-    if (want.start == 0) {
-        why = L"快照时读不到创建时间，身份无法核对";
-        return false;
-    }
-
-    FILETIME ct{}, et{}, kt{}, ut{};
-    if (!GetProcessTimes(h, &ct, &et, &kt, &ut)) {
-        why = Fmt(L"读创建时间失败（%u）", GetLastError());
-        return false;
-    }
-    if (FileTimeToU64(ct) != want.start) {
-        why = L"创建时间对不上，pid 已被别的进程复用";
-        return false;
-    }
-
-    wchar_t path[MAX_PATH * 2]{};
-    DWORD n = (DWORD)(sizeof(path) / sizeof(path[0]));
-    if (!QueryFullProcessImageNameW(h, 0, path, &n)) {
-        why = Fmt(L"读映像路径失败（%u），无法确认是不是它", GetLastError());
-        return false;
-    }
-    std::wstring base = path;
-    size_t slash = base.find_last_of(L"\\/");
-    if (slash != std::wstring::npos) base = base.substr(slash + 1);
-    if (Lower(base) != want.image) {
-        why = Fmt(L"映像名是 %s，已经不是快照里那个进程", base.c_str());
-        return false;
-    }
-    return true;
-}
-
-static KillReport KillPids(const std::vector<ProcIdent>& procs) {
-    KillReport rep;
-    const DWORD selfPid = GetCurrentProcessId();
-
-    for (const auto& want : procs) {
-        if (want.pid == 0 || want.pid == 4 || want.pid == selfPid) { rep.skipped++; continue; }
-
-        HANDLE h = OpenProcess(PROCESS_TERMINATE | PROCESS_QUERY_LIMITED_INFORMATION | SYNCHRONIZE,
-                               FALSE, want.pid);
-        if (!h) {
-            DWORD e = GetLastError();
-            if (e == ERROR_INVALID_PARAMETER) rep.gone++;   // 这个 pid 上已经没有进程了
-            else {
-                rep.failed++;
-                rep.detail += Fmt(L"· pid %u 打不开（%u）\r\n", want.pid, e);
-            }
-            continue;
-        }
-
-        if (WaitForSingleObject(h, 0) == WAIT_OBJECT_0) {     // 打开即已退出
-            rep.gone++;
-            CloseHandle(h);
-            continue;
-        }
-
-        std::wstring why;
-        if (!VerifyIdentity(h, want, why)) {
-            rep.skipped++;
-            rep.detail += Fmt(L"· pid %u 已跳过：%s\r\n", want.pid, why.c_str());
-            CloseHandle(h);
-            continue;
-        }
-
-        if (IsCriticalProcess(h)) {
-            rep.skipped++;
-            rep.detail += Fmt(L"· pid %u（%s）是系统关键进程，已拦截\r\n",
-                              want.pid, want.image.c_str());
-            CloseHandle(h);
-            continue;
-        }
-
-        if (TerminateProcess(h, 1)) {
-            rep.killed++;
-        } else {
-            DWORD e = GetLastError();
-            rep.failed++;
-            rep.detail += Fmt(L"· pid %u 结束失败（%u）\r\n", want.pid, e);
-        }
-        CloseHandle(h);
-    }
-    return rep;
-}
-
-static void MergeKillReport(KillReport& dst, const KillReport& src) {
-    dst.killed += src.killed;
-    dst.gone += src.gone;
-    dst.skipped += src.skipped;
-    dst.failed += src.failed;
-    dst.detail += src.detail;
-}
-
-static std::wstring KillSummary(const KillReport& rep) {
-    std::wstring s = Fmt(L"结束 %d 个", rep.killed);
-    if (rep.gone)    s += Fmt(L"，%d 个已自行退出", rep.gone);
-    if (rep.skipped) s += Fmt(L"，%d 个身份核对不通过已放过", rep.skipped);
-    if (rep.failed)  s += Fmt(L"，%d 个失败（权限或系统保护）", rep.failed);
-    s += L"。";
-    if (!rep.detail.empty()) s += L"\r\n" + rep.detail;
-    return s;
-}
-
-// 确认框里把目标摊开写：名字、个数、占用。默认按钮落在「否」，回车不会误成「是」。
-// 目标按值传进来：确认框是模态的，这期间定时刷新会重建 g_snap.rows，
-// 外面还拿着行指针就会指向已释放的内存。
-static bool ConfirmTerminate(HWND owner, const wchar_t* title, const std::wstring& head,
-                             const std::vector<ProcRow>& rows, const std::wstring& tail) {
-    std::wstring list;
-    int shown = 0;
-    for (const auto& r : rows) {
-        if (shown++ >= 8) continue;      // 再列下去框就装不下了，剩下的报总数
-        list += Fmt(L"· %s × %d，%.0f MB\r\n", r.name.c_str(), (int)r.pids.size(), r.memMB);
-    }
-    if ((int)rows.size() > 8) list += Fmt(L"…… 另有 %d 项\r\n", (int)rows.size() - 8);
-
-    std::wstring text = head + L"\r\n\r\n" + list + L"\r\n" + tail;
-    if (text.size() > 3000) text = text.substr(0, 3000) + L"……";   // MessageBox 会截断长文本
-    return MessageBoxW(owner, text.c_str(), title,
-                       MB_YESNO | MB_ICONWARNING | MB_DEFBUTTON2) == IDYES;
-}
+#include "core/safety.h"
 
 static void AppendChat(const std::wstring& text) {
     if (!g_chat) return;
@@ -2731,7 +2269,7 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
             for (auto& r : g_snap.rows) {
                 if (i > 8) break;
                 out += Fmt(L"%d. %s —— %.1f MB × %d%s\r\n", i++, r.name.c_str(), r.memMB, r.count,
-                           RiskTag(r.risk).empty() ? L"" : L" [" + RiskTag(r.risk) + L"]");
+                           RiskTag(r.risk).empty() ? L"" : (L" [" + RiskTag(r.risk) + L"]").c_str());
             }
             AppendChat(out);
         } else if (id == ID_BTN_ASK) {
@@ -2756,8 +2294,9 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
                 AppendChat(L"已取消，没有结束任何进程。");
                 break;
             }
-            KillReport sum;
-            for (auto& r : targets) MergeKillReport(sum, KillPids(r.pids));
+            std::vector<ProcIdent> identities;
+            for (const auto& r : targets) identities.insert(identities.end(), r.pids.begin(), r.pids.end());
+            KillReport sum = KillPids(identities);
             AppendChat(L"清理结果：" + KillSummary(sum));
             RefreshAsync(hwnd);
         } else if (id == ID_BTN_KILL) {
