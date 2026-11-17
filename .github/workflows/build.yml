@@ -94,6 +94,14 @@ jobs:
           build\resource_events_selftest.exe
           if errorlevel 1 exit /b 1
 
+      - name: Provided fault text evidence tests
+        shell: cmd
+        run: |
+          cl /nologo /std:c++17 /EHsc /O2 /utf-8 /W3 /Fo:build\ tools\fault_evidence_selftest.cpp /Fe:build\fault_evidence_selftest.exe
+          if errorlevel 1 exit /b 1
+          build\fault_evidence_selftest.exe
+          if errorlevel 1 exit /b 1
+
       - name: Benchmark harness smoke test (not a product comparison)
         shell: pwsh
         run: |

@@ -10,6 +10,11 @@ int main() {
         DiagnoseQuestion(L"IO",empty,context).find(L"进程 I/O 观测") != std::wstring::npos;
     std::cout << (routes ? "PASS" : "FAIL") << " production diagnostic query routing\n";
     if (!routes) return 1;
+    const auto logged = DiagnoseQuestion(L"日志证据: Error: listen EADDRINUSE: address already in use",empty,context);
+    const bool logRoute = logged.find(L"提供的文本包含") != std::wstring::npos &&
+        logged.find(L"非实时确诊") != std::wstring::npos;
+    std::cout << (logRoute ? "PASS" : "FAIL") << " explicit provided log routing remains unverified text evidence\n";
+    if (!logRoute) return 1;
     Snapshot first, second; CollectProcesses(first); Sleep(30); CollectProcesses(second);
     for (const auto& node : second.processes) {
         if(node.identity.pid != GetCurrentProcessId()) continue;

@@ -7,7 +7,7 @@ inline std::wstring SnapshotTimingReport(const Snapshot& s, uint64_t nowMs) {
         freshness == SampleFreshness::Stale ? L"过期，不应视为当前状态" : L"未知（未完成/时序无效/采样超过10秒）");
     if (ValidSampleWindow(s) && nowMs >= s.sampleEndMs)
         out += L"；样本年龄 " + std::to_wstring(nowMs-s.sampleEndMs) + L" ms";
-    out += L"。新鲜不代表每项指标可读取。\r\n";
+    out += L"。年龄按采样完成计；不保证独立缓存硬件读数的新鲜度，也不代表每项指标可读取。\r\n";
     out += L"进程枚举：" + std::wstring(s.processEnumerationComplete ? L"完成" : L"不完整或未知") + L"（不代表所有身份/指标完整）。\r\n";
     return out;
 }
