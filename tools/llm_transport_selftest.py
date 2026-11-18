@@ -8,12 +8,17 @@ import unittest
 from unittest.mock import MagicMock, patch
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from llm_adapter.boundary import BoundaryError
-from llm_adapter.transport import TransportConfig, explain_with_transport, _connection, _PinnedHTTPSConnection
+from llm_adapter.transport import TransportConfig, explain_with_transport, _connection, _PinnedHTTPSConnection, _request
 
 ENDPOINT = "http://127.0.0.1:8080/v1/chat/completions"
 
 class Tests(unittest.TestCase):
     def setUp(self):
+        # HTTP unit tests run direct mocks; worker lifecycle has its own suite.
+        self.worker = patch("llm_adapter.transport._request_isolated",
+                            side_effect=lambda c, d, s, cancel=None: _request(c, d, s))
+        self.worker.start()
+        self.addCleanup(self.worker.stop)
         self.network = patch("socket.socket", side_effect=AssertionError("Real network forbidden"))
         self.network.start()
         self.addCleanup(self.network.stop)

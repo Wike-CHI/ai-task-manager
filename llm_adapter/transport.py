@@ -5,6 +5,8 @@ Only explain_with_transport exposes deterministic findings to this transport.
 """
 from __future__ import annotations
 from dataclasses import dataclass, field
+from dataclasses import asdict
+from pathlib import Path
 import http.client
 import ipaddress
 import json
@@ -12,12 +14,21 @@ import math
 import re
 import socket
 import ssl
+import subprocess
+import sys
+import threading
+import time
 from urllib.parse import urlsplit
 
 from .boundary import BoundaryError, explain_findings, MAX_EXPLANATION_CHARS
 
 MAX_RESPONSE_BYTES = 32768
 MAX_REQUEST_BYTES = 16384
+_WORKER_SLOT = threading.BoundedSemaphore(1)
+
+
+class _WorkerCleanupError(RuntimeError):
+    """Fail closed: do not admit more workers until this parent restarts."""
 
 
 @dataclass(frozen=True)
@@ -161,7 +172,75 @@ def _request(config, destination, summary):
         conn.close()
 
 
-def explain_with_transport(findings, *, enabled=False, config=None, authorized_endpoint=None):
+def _spawn_worker():
+    # No shell, endpoint, credential or evidence in argv. -I ignores PYTHONPATH
+    # and user site packages. The sibling script is trusted installed code.
+    return subprocess.Popen(
+        [sys.executable, "-I", str(Path(__file__).with_name("worker.py"))],
+        stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
+        creationflags=subprocess.CREATE_NO_WINDOW if sys.platform == "win32" else 0,
+    )
+
+
+def _request_isolated(config, destination, summary, cancel_event=None):
+    # Reject concurrent optional explanations instead of queuing unbounded work.
+    if not _WORKER_SLOT.acquire(blocking=False):
+        raise ValueError("Explanation worker busy")
+    reusable = True
+    try:
+        return _run_worker(config, summary, cancel_event)
+    except _WorkerCleanupError:
+        reusable = False
+        raise
+    finally:
+        if reusable:
+            _WORKER_SLOT.release()
+
+
+def _run_worker(config, summary, cancel_event):
+    deadline = time.monotonic() + config.timeout_seconds
+    if cancel_event is not None and cancel_event.is_set():
+        raise ValueError("Explanation cancelled")
+    payload = json.dumps({"config": asdict(config), "summary": summary},
+                         allow_nan=False).encode("utf-8")
+    worker = _spawn_worker()
+    try:
+        while True:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0 or (cancel_event is not None and cancel_event.is_set()):
+                raise ValueError("Explanation timed out or cancelled")
+            try:
+                raw, _ = worker.communicate(input=payload, timeout=min(remaining, 0.05))
+                break
+            except subprocess.TimeoutExpired:
+                # communicate retains partially sent input across retries.
+                payload = None
+        if time.monotonic() >= deadline or (cancel_event is not None and cancel_event.is_set()):
+            raise ValueError("Explanation timed out or cancelled")
+        if worker.returncode != 0 or len(raw) > MAX_RESPONSE_BYTES:
+            raise ValueError("Explanation worker failed")
+        result = json.loads(raw)
+        if type(result) is not str or not result.strip() or len(result) > MAX_EXPLANATION_CHARS:
+            raise ValueError("Explanation worker output rejected")
+        return result
+    finally:
+        # Terminate only the child handle we created, never a rediscovered PID.
+        # Killing interrupts stuck resolver/SSL/slow-body operations, unlike a
+        # thread timeout. The worker never creates descendants.
+        try:
+            if worker.poll() is None:
+                worker.kill()
+            worker.communicate(timeout=1.0)
+        except BaseException:
+            raise _WorkerCleanupError("Explanation worker cleanup failed") from None
+        finally:
+            for stream in (worker.stdin, worker.stdout):
+                if stream is not None:
+                    stream.close()
+
+
+def explain_with_transport(findings, *, enabled=False, config=None, authorized_endpoint=None,
+                           cancel_event=None):
     """Opt-in AND exact endpoint approval required; approval supplied by trusted UI.
 
     Endpoint string is a guard, not proof of human consent. Calling integration must
@@ -173,4 +252,4 @@ def explain_with_transport(findings, *, enabled=False, config=None, authorized_e
         return explain_findings(findings)
     destination = _validate(config, authorized_endpoint)
     return explain_findings(findings, enabled=True,
-                            provider=lambda summary: _request(config, destination, summary))
+                            provider=lambda summary: _request_isolated(config, destination, summary, cancel_event))

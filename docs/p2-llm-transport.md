@@ -29,7 +29,7 @@ Canonical URL spelling is required: zero/empty/zero-padded ports, backslashes,
 duplicate or escaped path separators, dot segments and empty query/fragment
 markers are rejected rather than silently normalized.
 No redirects, retries, environment proxies, proxy discovery, environment API keys,
-configuration discovery, streaming, tool calls or file operations are implemented.
+configuration discovery, streaming, tool calls or credential-file operations are implemented.
 An optional bearer token is injected by the authorized caller, excluded from config
 repr, and sent only to the approved endpoint. It is not logged or returned. Never
 include credentials in examples or commit them to source control.
@@ -52,14 +52,36 @@ over 4,096 characters fail closed. Errors are fixed boundary messages, not HTTP
 response bodies, exceptions, credentials or endpoint strings. Connections close
 on success and failure; TLS wrapping failures close the raw socket.
 
-## Timeout limitations and future integration gate
+## Overall deadline, cancellation and integration gate
 
-Configurable socket timeout is positive and at most 15 seconds. It limits individual
-blocking socket operations, **not total wall-clock request duration**: DNS resolution
-has no independent deadline here, and a slow peer can repeatedly make progress.
-Do not run this synchronous library on the UI thread. Production integration needs
-a cancellable worker/process with a hard overall deadline and bounded concurrency.
-No claim of hard time isolation is made by this library.
+The optional transport now runs each HTTP request in a separate trusted Python
+worker. The parent enforces `timeout_seconds` (positive, at most 15 seconds) over
+worker startup, DNS, TLS, request sending, response reading and IPC. A socket timeout
+still limits individual operations, but a slow peer cannot reset the parent budget.
+On expiry or a caller-supplied `threading.Event` cancellation, the parent kills and
+reaps only its own child handle; it never looks up or terminates an unrelated PID.
+Only one request per parent process is allowed; concurrent calls fail closed rather
+than queue. If cleanup fails, the slot stays blocked until the parent restarts;
+subsequent calls cannot accumulate possibly surviving workers. Failures/cancellation preserve the deterministic facts and return the
+same sanitized `providerError`, with no partial explanation.
+
+The process command contains only Python and the fixed sibling worker script;
+configuration, injected credential and numeric summary travel via a private stdin
+pipe, not argv, disk or logs. Worker stderr is discarded and errors are fixed.
+The trusted worker emits only a bounded explanation; the parent buffers stdout
+before checking its length. This is not a bounded-output sandbox for malicious
+replacement worker code. Python isolated mode ignores `PYTHONPATH` and user site packages. This is lifecycle
+isolation of trusted code, not an OS security sandbox or a way to run model code.
+The worker does not create descendants. The internal worker script is not a public
+CLI/MCP endpoint and does not establish consent; authorization is validated by the
+trusted public API before any worker starts.
+
+Cancellation is polled at most every 50 ms while waiting. Deadline expiry is checked
+before accepting output. Cleanup has a separate one-second budget. OS process
+creation, scheduling and termination cannot offer a real-time guarantee, so total
+elapsed time can exceed the request budget by cleanup/scheduling overhead. Do not
+run the synchronous API on the UI thread. A future UI needs an asynchronous caller
+and a cancellation event; no GUI/CLI/MCP wiring or live model setup is added here.
 
 Other gates: real consent/configuration UI; approved credential storage and lifecycle;
 chosen provider's response compatibility and retention review; independent privacy
@@ -76,3 +98,9 @@ and DNS, mocks HTTP/TLS, and checks default-off behavior, exact URL authorizatio
 URL restrictions, timeout validation, proxy bypass, DNS pinning/private-address
 rejection, redirects, response bounds, error redaction, and no write authorization.
 All tests use fabricated summaries and replies. No real endpoint is contacted.
+
+`python -B tools/llm_deadline_selftest.py` additionally starts real Python child
+processes with fabricated HTTP/DNS implementations and explicit network blockers.
+It checks successful IPC, stalled DNS/body cutoff, pre-start and running cancellation,
+child reaping, default-off behavior, busy rejection and slot recovery after failures.
+These are lifecycle tests, not live-provider or Windows UI interoperability evidence.

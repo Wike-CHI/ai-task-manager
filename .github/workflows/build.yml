@@ -182,6 +182,10 @@ jobs:
           PYTHONDONTWRITEBYTECODE: '1'
         run: python tools/llm_transport_selftest.py
 
+      - name: Optional LLM worker deadline tests (offline subprocesses only)
+        shell: pwsh
+        run: python tools/llm_deadline_selftest.py
+
       - name: Controlled owned-loopback bind failure demo
         shell: cmd
         run: |
