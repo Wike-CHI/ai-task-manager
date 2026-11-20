@@ -41,6 +41,10 @@ jobs:
           if errorlevel 1 exit /b 1
           build\core_selftest.exe
           if errorlevel 1 exit /b 1
+          cl /nologo /std:c++17 /EHsc /O2 /utf-8 /W3 /Fo:build\ tools\confirmation_selftest.cpp /Fe:build\confirmation_selftest.exe
+          if errorlevel 1 exit /b 1
+          build\confirmation_selftest.exe
+          if errorlevel 1 exit /b 1
           cl /nologo /std:c++17 /EHsc /O2 /utf-8 /W3 /Fo:build\ tools\safety_selftest.cpp /Fe:build\safety_selftest.exe
           if errorlevel 1 exit /b 1
           build\safety_selftest.exe

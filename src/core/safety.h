@@ -1,4 +1,5 @@
 #pragma once
+#include <utility>
 #include "collector.h"
 #include "format.h"
 struct KillReport {
@@ -140,28 +141,24 @@ static std::wstring KillSummary(const KillReport& rep) {
     return s;
 }
 
-// 确认框里把目标摊开写：名字、个数、占用。默认按钮落在「否」，回车不会误成「是」。
-// 目标按值传进来：确认框是模态的，这期间定时刷新会重建 g_snap.rows，
-// 外面还拿着行指针就会指向已释放的内存。
-static bool ConfirmTerminate(HWND owner, const wchar_t* title, const std::wstring& head,
-                             const std::vector<ProcRow>& rows, const std::wstring& tail) {
-    // One bounded page per target: no hidden/truncated targets can be approved.
-    // Collect all approvals before returning; cancellation performs zero terminations.
-    for (const auto& row : rows) {
-        for (const auto& id : row.pids) {
-            std::wstring text = head + L"\r\n\r\n" + row.name +
+#include "confirmation.h"
+static constexpr UINT TerminationPromptFlags = MB_YESNO | MB_ICONWARNING | MB_DEFBUTTON2;
+
+// The same approval barrier is used by both individual and batch UI actions.
+static bool ConfirmAndTerminate(HWND owner, const wchar_t* title, const std::wstring& head,
+                               std::vector<ProcRow> rows, const std::wstring& tail,
+                               KillReport& report) {
+    const auto result = RunConfirmedTermination(std::move(rows),
+        [&](const ProcRow& row, const ProcIdent& id) {
+            const std::wstring text = head + L"\r\n\r\n" + row.name +
                 Fmt(L"\r\nPID %u · creation %llu\r\n", id.pid, id.start) +
                 id.path + L"\r\n\r\n" + tail;
             if (text.size() > 3000) {
                 MessageBoxW(owner, L"目标信息过长，无法完整展示，已取消。", title, MB_ICONWARNING);
-                return false;
+                return ConfirmationDecision::Reject;
             }
-            if (MessageBoxW(owner, text.c_str(), title,
-                MB_YESNO | MB_ICONWARNING | MB_DEFBUTTON2) != IDYES) return false;
-        }
-    }
-    return !rows.empty();
+            return MessageBoxW(owner, text.c_str(), title, TerminationPromptFlags) == IDYES
+                ? ConfirmationDecision::Approve : ConfirmationDecision::Reject;
+        }, [&](const std::vector<ProcIdent>& identities) { report = KillPids(identities); });
+    return result == ConfirmationResult::Executed;
 }
-
-
-

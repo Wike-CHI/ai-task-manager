@@ -69,6 +69,9 @@ static bool DeadWithin(DWORD pid, DWORD ms) {
 }
 
 int wmain() {
+    Check((TerminationPromptFlags & MB_TYPEMASK) == MB_YESNO &&
+          (TerminationPromptFlags & MB_DEFMASK) == MB_DEFBUTTON2,
+          L"结束确认默认选择否（配置断言，非UI交互）");
     // 1. 身份对得上：应该杀掉
     {
         DWORD pid = 0;

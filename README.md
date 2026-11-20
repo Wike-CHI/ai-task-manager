@@ -407,3 +407,5 @@ jobs:
 结束操作逐个展示冻结目标的 PID、创建时间和完整路径，默认“否”；任何取消均不执行整批目标。确认后只处理冻结身份，不扩大到新启动进程。原生安全测试仅操作自己启动的测试子进程。
 
 基准与 Argus 对照流程见 [docs/benchmark.md](docs/benchmark.md)。CI smoke 仅验证采样脚本，不是性能胜出证据。Windows UI 多主题/取消流程仍需人工验收。
+
+确认屏障 `src/core/confirmation.h` 由单项和批量结束共用：先校验冻结目标，拒绝空/不完整/重复 PID，再收齐批准后执行；取消时零执行。`tools/confirmation_selftest.cpp` 自动测试控制逻辑，Windows 测试检查默认“否”的配置，但不替代真实 UI 人工验收。结束本身可能部分失败，不保证操作回滚。

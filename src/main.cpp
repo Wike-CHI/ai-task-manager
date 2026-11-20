@@ -2290,13 +2290,11 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
             std::wstring head = Fmt(L"将结束 %d 组共 %d 个进程：", (int)targets.size(), procs);
             std::wstring tail = L"未保存的内容会丢；模型、编辑器等不在可关清单里，不会被选中。\r\n"
                                 L"执行时会逐个核对进程身份，对不上的一律不动。";
-            if (!ConfirmTerminate(hwnd, L"确认结束进程", head, targets, tail)) {
+            KillReport sum;
+            if (!ConfirmAndTerminate(hwnd, L"确认结束进程", head, targets, tail, sum)) {
                 AppendChat(L"已取消，没有结束任何进程。");
                 break;
             }
-            std::vector<ProcIdent> identities;
-            for (const auto& r : targets) identities.insert(identities.end(), r.pids.begin(), r.pids.end());
-            KillReport sum = KillPids(identities);
             AppendChat(L"清理结果：" + KillSummary(sum));
             RefreshAsync(hwnd);
         } else if (id == ID_BTN_KILL) {
@@ -2319,11 +2317,12 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
             std::vector<ProcRow> one{ r };
             std::wstring head = Fmt(L"结束 %s 的 %d 个进程？", r.name.c_str(), (int)r.pids.size());
             std::wstring tail = r.why + L"\r\n" + warn + L"\r\n执行时会逐个核对进程身份，对不上的一律不动。";
-            if (!ConfirmTerminate(hwnd, L"确认结束进程", head, one, tail)) {
+            KillReport report;
+            if (!ConfirmAndTerminate(hwnd, L"确认结束进程", head, one, tail, report)) {
                 AppendChat(L"已取消，没有结束任何进程。");
                 break;
             }
-            AppendChat(Fmt(L"%s：", r.name.c_str()) + KillSummary(KillPids(r.pids)));
+            AppendChat(Fmt(L"%s：", r.name.c_str()) + KillSummary(report));
             RefreshAsync(hwnd);
         } else if (id == ID_BTN_THEME) {
             g_mode = (g_mode + 1) % 3;
