@@ -23,6 +23,9 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      - name: Release-neutral workflow regression gate
+        run: python -B tools/release_guard_selftest.py
+
       - name: Setup MSVC
         uses: ilammy/msvc-dev-cmd@v1
 
