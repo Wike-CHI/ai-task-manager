@@ -16,6 +16,7 @@
 #include <cstddef>
 #include <cstring>
 #include "port_query.h"
+#include "process_identity.h"
 #pragma comment(lib, "iphlpapi.lib")
 #pragma comment(lib, "ws2_32.lib")
 
@@ -26,6 +27,9 @@ struct TcpListenerEvidence {
     uint64_t creation = 0;
     std::wstring path;
     bool endpointReobserved = false, identityKnown = false;
+    bool endpointAssociated = false;
+    uint64_t associationMs = 0;
+    DWORD associationStatus = ERROR_NOT_READY;
     std::wstring identityUnknown;
 };
 struct TcpListenerQuery {
@@ -36,9 +40,6 @@ struct TcpListenerQuery {
     size_t omitted = 0;
     std::vector<TcpListenerEvidence> listeners;
 };
-inline uint64_t PortFileTime(const FILETIME& ft) {
-    ULARGE_INTEGER n{}; n.LowPart=ft.dwLowDateTime; n.HighPart=ft.dwHighDateTime; return n.QuadPart;
-}
 inline bool SameTcpEndpoint(const TcpListenerEvidence& a, const TcpListenerEvidence& b) {
     return a.family==b.family && a.pid==b.pid && a.port==b.port && a.scope==b.scope &&
         std::memcmp(a.address,b.address,a.family==AF_INET ? 4 : 16)==0;
@@ -80,17 +81,26 @@ inline DWORD ReadTcpListenerTable(DWORD family, uint16_t port, std::vector<TcpLi
     return ERROR_RETRY;
 }
 inline void ReadListenerIdentity(TcpListenerEvidence& row, uint64_t tableStarted) {
+    row.identityKnown=false; row.endpointAssociated=false; row.creation=0; row.path.clear();
+    row.associationMs=0; row.associationStatus=ERROR_NOT_READY; row.identityUnknown.clear();
     if(!row.endpointReobserved) { row.identityUnknown=L"端点未被再次观测或复查失败"; return; }
     HANDLE h=OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION|SYNCHRONIZE,FALSE,row.pid);
     if(!h) { row.identityUnknown=L"进程不可读取（权限/已退出）"; return; }
-    FILETIME created{},exited{},kernel{},user{};
-    wchar_t path[32768]{}; DWORD length=32768;
-    const bool ok=GetProcessId(h)==row.pid && WaitForSingleObject(h,0)==WAIT_TIMEOUT &&
-        GetProcessTimes(h,&created,&exited,&kernel,&user) &&
-        QueryFullProcessImageNameW(h,0,path,&length);
-    const auto creation=PortFileTime(created);
-    if(ok && creation && creation<=tableStarted && length && WaitForSingleObject(h,0)==WAIT_TIMEOUT) {
-        row.creation=creation; row.path.assign(path,length); row.identityKnown=true;
+    ProcIdent identity; std::wstring why;
+    const bool known = WaitForSingleObject(h,0)==WAIT_TIMEOUT &&
+        ReadProcessIdentity(h,identity,why) && identity.pid==row.pid && identity.start<=tableStarted;
+    if(known) {
+        // Reobserve this endpoint while retaining the already identified process
+        // handle; the PID is never reopened for the association check.
+        std::vector<TcpListenerEvidence> held;
+        row.associationStatus=ReadTcpListenerTable(row.family,row.port,held);
+        row.associationMs=GetTickCount64();
+        row.endpointAssociated=row.associationStatus==NO_ERROR &&
+            std::any_of(held.begin(),held.end(),[&](const TcpListenerEvidence& e){return SameTcpEndpoint(row,e);}) &&
+            WaitForSingleObject(h,0)==WAIT_TIMEOUT && VerifyIdentity(h,identity,why);
+        if(row.endpointAssociated) {
+            row.creation=identity.start; row.path=identity.path; row.identityKnown=true;
+        } else row.identityUnknown=L"持有进程句柄期间未确认端点仍归该身份，或采样失败";
     } else row.identityUnknown=L"创建时间/路径/存活状态无法确认，或进程晚于表采样边界创建";
     CloseHandle(h);
 }
@@ -107,7 +117,7 @@ inline TcpListenerQuery QueryTcpListeners(uint16_t port) {
         for(auto& row:initial) {
             if(query.listeners.size()>=128) { ++query.omitted; continue; }
             row.endpointReobserved=status==NO_ERROR && std::any_of(again.begin(),again.end(),[&](const TcpListenerEvidence& next){return SameTcpEndpoint(row,next);});
-            ReadListenerIdentity(row,PortFileTime(boundary));
+            ReadListenerIdentity(row,FileTimeToU64(boundary));
             query.listeners.push_back(row);
         }
     };
@@ -129,6 +139,8 @@ inline std::wstring RenderTcpListenerEvidence(const TcpListenerQuery& query) {
         out+=L":"+std::to_wstring(row.port)+L" PID "+std::to_wstring(row.pid);
         if(row.identityKnown) out+=L" creation "+std::to_wstring(row.creation)+L" 路径 "+row.path;
         else out+=L" 身份未知："+row.identityUnknown;
+        out+=L"；同句柄端点关联 "+std::wstring(row.endpointAssociated?L"已观测":L"未知")+
+            L"，时间 "+std::to_wstring(row.associationMs)+L" ms，状态 "+std::to_wstring(row.associationStatus);
         out+=L"\r\n";
     }
     if(query.listeners.empty()) out+=L"本次未观测到匹配监听端点；不代表端口可绑定，查询失败也不是空表证据。\r\n";

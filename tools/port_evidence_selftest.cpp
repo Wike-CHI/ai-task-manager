@@ -39,8 +39,8 @@ int main() {
         check((family==AF_INET?q.ipv4Status:q.ipv6Status)==NO_ERROR,"requested address family table is readable");
         FILETIME ownCreated{},ownExited{},ownKernel{},ownUser{};
         const bool ownTimes=GetProcessTimes(GetCurrentProcess(),&ownCreated,&ownExited,&ownKernel,&ownUser)!=FALSE;
-        check(row!=q.listeners.end()&&row->endpointReobserved&&row->identityKnown&&ownTimes&&
-              row->creation==PortFileTime(ownCreated)&&!row->path.empty(),
+        check(row!=q.listeners.end()&&row->endpointReobserved&&row->endpointAssociated&&row->associationStatus==NO_ERROR&&row->identityKnown&&ownTimes&&
+              row->creation==FileTimeToU64(ownCreated)&&!row->path.empty(),
               "own listener carries reobserved endpoint and matching process identity");
         const auto text=RenderTcpListenerEvidence(q);
         check(text.find(L"监听不等于冲突")!=std::wstring::npos&&text.find(L"不是原子快照")!=std::wstring::npos,"renderer retains non-atomic and non-conflict limitations");

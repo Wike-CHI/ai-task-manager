@@ -16,9 +16,11 @@ int main() {
     std::cout << (logRoute ? "PASS" : "FAIL") << " explicit provided log routing remains unverified text evidence\n";
     if (!logRoute) return 1;
     Snapshot first, second; CollectProcesses(first); Sleep(30); CollectProcesses(second);
+    const auto firstSelf = std::find_if(first.processes.begin(), first.processes.end(), [](const ProcessNode& n) { return n.identity.pid == GetCurrentProcessId(); });
+    const bool firstCpuUnknown = firstSelf != first.processes.end() && !firstSelf->cpuSampleValid;
     for (const auto& node : second.processes) {
         if(node.identity.pid != GetCurrentProcessId()) continue;
-        const bool ok = node.ioCounters.valid && node.identity.start != 0 &&
+        const bool ok = firstCpuUnknown && node.cpuSampleValid && node.ioCounters.valid && node.identity.start != 0 &&
             node.ioRate.available() && node.ioRate.elapsedSeconds > 0 &&
             node.ioCounters.creation == node.identity.start &&
             BuildIoFinding(node).state == FindingState::Observed;
