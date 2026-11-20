@@ -122,6 +122,30 @@ jobs:
           build\process_identity_selftest.exe
           if errorlevel 1 exit /b 1
 
+      - name: Read-only CLI build and unit tests
+        shell: cmd
+        run: |
+          cl /nologo /std:c++17 /EHsc /O2 /utf-8 /W3 /Fo:build\ tools\readonly_command_selftest.cpp /Fe:build\readonly_command_selftest.exe
+          if errorlevel 1 exit /b 1
+          build\readonly_command_selftest.exe
+          if errorlevel 1 exit /b 1
+          cl /nologo /std:c++17 /EHsc /O2 /utf-8 /W3 /Fo:build\ tools\readonly_json_selftest.cpp /Fe:build\readonly_json_selftest.exe
+          if errorlevel 1 exit /b 1
+          build\readonly_json_selftest.exe
+          if errorlevel 1 exit /b 1
+          cl /nologo /std:c++17 /EHsc /O2 /utf-8 /W3 /Fo:build\ src\readonly_cli.cpp /Fe:AITaskManagerReadOnly.exe psapi.lib
+          if errorlevel 1 exit /b 1
+
+      - name: Read-only CLI integration smoke
+        shell: pwsh
+        run: ./tools/readonly_cli_smoke.ps1
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: AITaskManagerReadOnly
+          path: AITaskManagerReadOnly.exe
+          if-no-files-found: error
+
       - name: Benchmark harness smoke test (not a product comparison)
         shell: pwsh
         run: |
