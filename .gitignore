@@ -12,3 +12,8 @@ build/
 
 # local
 *.log
+
+# Optional Python interfaces/tests
+__pycache__/
+*.py[cod]
+.venv/
