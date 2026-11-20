@@ -31,6 +31,8 @@ static void CollectProcesses(Snapshot& s) {
     std::map<std::wstring, ProcRow> groups;
 
     s.processes.clear();
+    s.processEnumerationComplete = false;
+    s.procCount = 0;
     FILETIME started{}; GetSystemTimeAsFileTime(&started);
     const auto snapshotStarted = FileTimeToU64(started);
     HANDLE snap = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0);
@@ -95,7 +97,7 @@ static void CollectProcesses(Snapshot& s) {
                 PROCESS_MEMORY_COUNTERS_EX pmc{};
                 if (GetProcessMemoryInfo(h, (PROCESS_MEMORY_COUNTERS*)&pmc, sizeof(pmc))) {
                     double mb = pmc.WorkingSetSize / 1048576.0;
-                    row.memMB += mb; node.memMB = mb;
+                    row.memMB += mb; node.memMB = mb; node.memorySampleValid = row.pids.back().start != 0 && !row.pids.back().path.empty();
                     if (key == L"llama-server.exe") {
                         s.modelRunning = true;
                         s.modelMemGB += mb / 1024.0;
@@ -104,6 +106,10 @@ static void CollectProcesses(Snapshot& s) {
                 node.identity = row.pids.back();
                 CloseHandle(h);
             } while (Process32NextW(snap, &pe));
+            s.processEnumerationComplete = GetLastError() == ERROR_NO_MORE_FILES;
+        } else {
+            // An empty successful enumeration is distinct from access/API failure.
+            s.processEnumerationComplete = GetLastError() == ERROR_NO_MORE_FILES;
         }
         CloseHandle(snap);
         s.procCount = count;

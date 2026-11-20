@@ -73,10 +73,19 @@ inline std::vector<DiagnosticFinding> BuildDiagnosticFindings(const Snapshot& sn
     out.push_back(UnknownFinding(L"hard_faults", L"硬缺页及磁盘瓶颈未确诊",
         L"尚未采集硬缺页事件/物理磁盘延迟；进程 I/O 字节和总缺页不能代替它们",
         L"后续接入经验证的 ETW/性能计数器，并保留缺失状态"));
+    for(size_t i=0; i<3; ++i) {
+        if(snapshot.sampleComplete && snapshot.sampleEndMs>=snapshot.sampleStartMs) {
+            auto& f=out[i];
+            f.evidence.push_back({L"sample_start",std::to_wstring(snapshot.sampleStartMs),L"ms",L"GetTickCount64（同一次运行）"});
+            f.evidence.push_back({L"sample_end",std::to_wstring(snapshot.sampleEndMs),L"ms",L"GetTickCount64（同一次运行）"});
+            for(auto& missing:f.unknowns)
+                if(missing==L"未提供采样时间戳，不能据此保证新鲜度") missing=L"时间戳不保证完整采样；请结合新鲜度及数据源有效性";
+        }
+    }
     return out;
 }
 inline std::wstring RenderDiagnosticFindings(const std::vector<DiagnosticFinding>& findings) {
-    std::wstring out = L"证据诊断（快照证据，不保证新鲜度；无故障概率估计）：\r\n";
+    std::wstring out = L"证据诊断（文本或快照证据；无故障概率估计）：\r\n";
     for (const auto& f : findings) {
         const wchar_t* status = f.state == FindingState::Risk ? L"风险提示" :
             f.state == FindingState::Observed ? L"观测" : L"未知";
