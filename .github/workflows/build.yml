@@ -166,6 +166,12 @@ jobs:
           python tools/mcp_protocol_selftest.py --cli "${{ github.workspace }}/AITaskManagerReadOnly.exe"
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
+      - name: Offline optional explanation boundary tests
+        shell: pwsh
+        env:
+          PYTHONDONTWRITEBYTECODE: '1'
+        run: python tools/llm_boundary_selftest.py
+
       - name: Benchmark harness smoke test (not a product comparison)
         shell: pwsh
         run: |
