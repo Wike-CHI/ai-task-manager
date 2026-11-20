@@ -6,6 +6,13 @@ on:
     tags: ["v*"]
   pull_request:
   workflow_dispatch:
+    inputs:
+      channel:
+        description: 'Unsigned artifact candidate only; never publishes a release'
+        required: true
+        default: validation
+        type: choice
+        options: [validation, nightly-candidate, stable-candidate]
 
 permissions:
   contents: read
@@ -86,6 +93,106 @@ jobs:
           build\io_windows_selftest.exe
           if errorlevel 1 exit /b 1
 
+      - name: Resource event and freshness tests
+        shell: cmd
+        run: |
+          cl /nologo /std:c++17 /EHsc /O2 /utf-8 /W3 /Fo:build\ tools\resource_events_selftest.cpp /Fe:build\resource_events_selftest.exe
+          if errorlevel 1 exit /b 1
+          build\resource_events_selftest.exe
+          if errorlevel 1 exit /b 1
+
+      - name: Provided fault text evidence tests
+        shell: cmd
+        run: |
+          cl /nologo /std:c++17 /EHsc /O2 /utf-8 /W3 /Fo:build\ tools\fault_evidence_selftest.cpp /Fe:build\fault_evidence_selftest.exe
+          if errorlevel 1 exit /b 1
+          build\fault_evidence_selftest.exe
+          if errorlevel 1 exit /b 1
+
+      - name: Read-only TCP listener evidence tests
+        shell: cmd
+        run: |
+          cl /nologo /std:c++17 /EHsc /O2 /utf-8 /W3 /Fo:build\ tools\port_query_selftest.cpp /Fe:build\port_query_selftest.exe
+          if errorlevel 1 exit /b 1
+          build\port_query_selftest.exe
+          if errorlevel 1 exit /b 1
+          cl /nologo /std:c++17 /EHsc /O2 /utf-8 /W3 /Fo:build\ tools\port_evidence_selftest.cpp /Fe:build\port_evidence_selftest.exe
+          if errorlevel 1 exit /b 1
+          build\port_evidence_selftest.exe
+          if errorlevel 1 exit /b 1
+
+      - name: Shared process identity tests
+        shell: cmd
+        run: |
+          cl /nologo /std:c++17 /EHsc /O2 /utf-8 /W3 /Fo:build\ tools\process_identity_selftest.cpp /Fe:build\process_identity_selftest.exe
+          if errorlevel 1 exit /b 1
+          build\process_identity_selftest.exe
+          if errorlevel 1 exit /b 1
+
+      - name: Read-only CLI build and unit tests
+        shell: cmd
+        run: |
+          cl /nologo /std:c++17 /EHsc /O2 /utf-8 /W3 /Fo:build\ tools\readonly_command_selftest.cpp /Fe:build\readonly_command_selftest.exe
+          if errorlevel 1 exit /b 1
+          build\readonly_command_selftest.exe
+          if errorlevel 1 exit /b 1
+          cl /nologo /std:c++17 /EHsc /O2 /utf-8 /W3 /Fo:build\ tools\readonly_json_selftest.cpp /Fe:build\readonly_json_selftest.exe
+          if errorlevel 1 exit /b 1
+          build\readonly_json_selftest.exe
+          if errorlevel 1 exit /b 1
+          cl /nologo /std:c++17 /EHsc /O2 /utf-8 /W3 /Fo:build\ src\readonly_cli.cpp /Fe:AITaskManagerReadOnly.exe psapi.lib
+          if errorlevel 1 exit /b 1
+
+      - name: Read-only CLI integration smoke
+        shell: pwsh
+        run: ./tools/readonly_cli_smoke.ps1
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: AITaskManagerReadOnly
+          path: AITaskManagerReadOnly.exe
+          if-no-files-found: error
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Optional read-only MCP dependencies
+        shell: pwsh
+        run: python -m pip install -r requirements-mcp.txt
+
+      - name: Read-only MCP backend and official protocol tests
+        shell: pwsh
+        env:
+          PYTHONDONTWRITEBYTECODE: '1'
+        run: |
+          python tools/mcp_backend_selftest.py
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          python tools/mcp_protocol_selftest.py
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          python tools/mcp_protocol_selftest.py --cli "${{ github.workspace }}/AITaskManagerReadOnly.exe"
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+      - name: Offline optional explanation boundary tests
+        shell: pwsh
+        env:
+          PYTHONDONTWRITEBYTECODE: '1'
+        run: python tools/llm_boundary_selftest.py
+
+      - name: Offline optional transport tests (network blocked)
+        shell: pwsh
+        env:
+          PYTHONDONTWRITEBYTECODE: '1'
+        run: python tools/llm_transport_selftest.py
+
+      - name: Controlled owned-loopback bind failure demo
+        shell: cmd
+        run: |
+          cl /nologo /std:c++17 /EHsc /O2 /utf-8 /W3 /Fo:build\ tools\demo_port_conflict.cpp /Fe:build\demo_port_conflict.exe
+          if errorlevel 1 exit /b 1
+          build\demo_port_conflict.exe
+          if errorlevel 1 exit /b 1
+
       - name: Benchmark harness smoke test (not a product comparison)
         shell: pwsh
         run: |
@@ -110,4 +217,28 @@ jobs:
         with:
           name: AITaskManager
           path: AITaskManager.exe
+          retention-days: 30
+
+      - name: Verify release-negative channel policy
+        shell: pwsh
+        run: python tools/release_channel_selftest.py
+
+      - name: Select artifact channel
+        id: channel
+        shell: pwsh
+        env:
+          REQUESTED_CHANNEL: ${{ inputs.channel }}
+        run: python tools/build_channel.py
+
+      - name: Package unsigned candidates and integrity manifest
+        shell: pwsh
+        env:
+          REQUESTED_CHANNEL: ${{ inputs.channel }}
+        run: python tools/package_candidate.py
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ${{ steps.channel.outputs.channel }}-${{ github.sha }}
+          path: build/candidate/
+          if-no-files-found: error
           retention-days: 30
