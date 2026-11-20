@@ -8,6 +8,7 @@
 #include "diagnostic_query.h"
 #include "resource_event_report.h"
 #include "fault_evidence.h"
+#include "port_evidence.h"
 struct DiagnosticContext {
     const Sample* history;
     int historyCount, historyHead, historyCapacity;
@@ -127,6 +128,8 @@ static std::wstring WorkloadReport(const Snapshot& s) {
 static std::wstring DiagnoseQuestion(const std::wstring& q, const Snapshot& s, const DiagnosticContext& ctx) {
     const auto faultPrefix = ProvidedFaultPrefixLength(q);
     if (faultPrefix) return RenderDiagnosticFindings(ParseProvidedFaultEvidence(q.substr(faultPrefix)));
+    uint16_t port = 0;
+    if (ParsePortQuery(q, port)) return QueryTcpListenerEvidence(port);
     std::wstring low = Lower(q);
     auto has = [&](const wchar_t* k) { return low.find(k) != std::wstring::npos; };
 
