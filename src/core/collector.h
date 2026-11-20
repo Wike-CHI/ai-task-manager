@@ -46,6 +46,7 @@ static void CollectProcesses(Snapshot& s) {
                 row.name = name;
                 row.count++;
                 row.pids.push_back(ProcIdent{ pid, 0, key });
+                row.pids.back().parentPid = pe.th32ParentProcessID;
 
                 s.processes.push_back(ProcessNode{row.pids.back(), pe.th32ParentProcessID});
                 auto& node = s.processes.back();
@@ -99,8 +100,9 @@ static void CollectProcesses(Snapshot& s) {
         auto it = RISK_TABLE.find(kv.first);
         if (it != RISK_TABLE.end()) {
             r.risk = it->second.first;
-            r.why = it->second.second;
+            r.why = ClassificationEvidence(kv.first);
         }
+        if (r.why.empty()) r.why = ClassificationEvidence(kv.first);
         s.rows.push_back(r);
     }
 
@@ -109,7 +111,7 @@ static void CollectProcesses(Snapshot& s) {
     const DWORD selfPid = GetCurrentProcessId();
     for (auto& r : s.rows) {
         for (const auto& p : r.pids) {
-            if (p.pid == selfPid) { r.risk = RISK_PROTECTED; r.why = L"本程序"; break; }
+            if (p.pid == selfPid) { r.risk = RISK_PROTECTED; r.why = L"分类依据：PID 等于当前程序 PID，禁止结束自身"; break; }
         }
     }
 

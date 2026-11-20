@@ -12,6 +12,7 @@ struct ProcIdent {
     uint64_t     start = 0;     // 创建时间；0 = 快照时打不开，身份未知，后面一律不杀
     std::wstring image;         // 快照时的映像名（小写）
     std::wstring path;          // normalized full image path; empty means unknown
+    uint32_t parentPid = 0;     // observed parent PID, not proof of parent identity
 };
 
 struct ProcRow {
