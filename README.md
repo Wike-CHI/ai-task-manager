@@ -1,3 +1,5 @@
+[English development README](README.en.md)
+
 # AI 任务管理器（C++ / Win32）
 
 [![build](https://github.com/Wike-CHI/ai-task-manager/actions/workflows/build.yml/badge.svg)](https://github.com/Wike-CHI/ai-task-manager/actions/workflows/build.yml)
