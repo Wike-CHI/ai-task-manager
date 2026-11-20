@@ -66,6 +66,14 @@ jobs:
           build\graceful_selftest.exe
           if errorlevel 1 exit /b 1
 
+      - name: Structured diagnostic evidence tests
+        shell: cmd
+        run: |
+          cl /nologo /std:c++17 /EHsc /O2 /utf-8 /W3 /Fo:build\ tools\diagnostic_evidence_selftest.cpp /Fe:build\diagnostic_evidence_selftest.exe
+          if errorlevel 1 exit /b 1
+          build\diagnostic_evidence_selftest.exe
+          if errorlevel 1 exit /b 1
+
       - name: Benchmark harness smoke test (not a product comparison)
         shell: pwsh
         run: |
