@@ -1,5 +1,6 @@
 #pragma once
 #include <cstdint>
+#include <cstddef>
 #include <string>
 #include <vector>
 enum Risk { RISK_PROTECTED, RISK_MODEL, RISK_SAFE, RISK_CAREFUL, RISK_NORMAL };
@@ -49,6 +50,22 @@ struct ProcessNode {
     double memMB = 0, cpuPct = 0;
     ProcessIoSample ioCounters{};
     ProcessIoRate ioRate{};
+    bool memorySampleValid = false; // false is unknown, not measured zero working set
+    bool cpuSampleValid = false; // false is unknown, not measured zero CPU
+};
+
+enum class ResourceEventKind { ObservedNew, NoLongerObserved, WorkingSetChanged };
+struct ResourceEvent {
+    ResourceEventKind kind = ResourceEventKind::ObservedNew;
+    ProcIdent identity;
+    uint64_t previousSampleMs = 0, currentSampleMs = 0;
+    double previousMemoryMB = 0, currentMemoryMB = 0;
+};
+enum class ResourceEventState { FirstSample, Incomplete, InvalidTime, GapTooLarge, Comparable };
+struct ResourceEventBatch {
+    ResourceEventState state = ResourceEventState::FirstSample;
+    std::vector<ResourceEvent> events;
+    std::size_t omitted = 0;
 };
 
 struct Snapshot {
@@ -62,5 +79,13 @@ struct Snapshot {
     bool   modelRunning = false;
     std::vector<ProcRow> rows;
     std::vector<ProcessNode> processes;
+    // Monotonic timestamps, meaningful only within this run/boot. Completion
+    // does not imply that every metric or per-process identity was readable.
+    uint64_t sampleStartMs = 0, sampleEndMs = 0;
+    bool sampleComplete = false;
+    bool processEnumerationComplete = false;
+    std::vector<ResourceEvent> resourceEvents; // only the latest comparison, capped
+    ResourceEventState resourceEventState = ResourceEventState::FirstSample;
+    std::size_t resourceEventsOmitted = 0;
 };
 

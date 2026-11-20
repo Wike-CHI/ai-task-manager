@@ -1,0 +1,2 @@
+# Optional stdio wrapper only. Pin the tested official v1 SDK; do not silently jump to v2.
+mcp==1.29.0

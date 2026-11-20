@@ -260,8 +260,11 @@ static double WeightsGB() {
 }
 
 #include "core/collector.h"
+#include "core/resource_events.h"
 
 static void Collect(Snapshot& s) {
+    s.sampleComplete = false;
+    s.sampleStartMs = GetTickCount64();
     MEMORYSTATUSEX ms{};
     ms.dwLength = sizeof(ms);
     GlobalMemoryStatusEx(&ms);
@@ -296,6 +299,8 @@ static void Collect(Snapshot& s) {
     s.modelMemGB = 0;
 
     CollectProcesses(s);
+    s.sampleEndMs = GetTickCount64();
+    s.sampleComplete = true;
 }
 
 #include "core/diagnosis.h"
@@ -893,12 +898,19 @@ static void RefreshAsync(HWND hwnd) {
     std::thread([hwnd]() {
         auto* snap = new Snapshot();
         Collect(*snap);
-        PostMessageW(hwnd, WM_APP_SNAPSHOT, 0, (LPARAM)snap);
+        if (!PostMessageW(hwnd, WM_APP_SNAPSHOT, 0, (LPARAM)snap)) {
+            delete snap;
+            g_busy = false;
+        }
     }).detach();
 }
 
 static void OnSnapshot(HWND hwnd, Snapshot* snap) {
     EnterCriticalSection(&g_lock);
+    const auto events = CompareResourceSnapshots(g_snap.sampleComplete ? &g_snap : nullptr, *snap);
+    snap->resourceEvents = events.events;
+    snap->resourceEventState = events.state;
+    snap->resourceEventsOmitted = events.omitted;
     g_snap = *snap;
     delete snap;
     PushHistory(g_snap);
@@ -1970,10 +1982,17 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
             }
             AppendChat(out);
         } else if (id == ID_BTN_ASK) {
-            wchar_t q[512]{};
-            SendMessageW(g_input, WM_GETTEXT, 511, (LPARAM)q);
-            if (q[0] == 0) { AppendChat(L"先在输入框写个问题，比如「为什么卡」。"); break; }
-            AppendChat(std::wstring(L"你：") + q);
+            const int length = GetWindowTextLengthW(g_input);
+            if (length <= 0) { AppendChat(L"先输入问题或“日志证据: 单行错误片段”。"); break; }
+            if (length > (int)MaxFaultEvidenceChars + 32) {
+                AppendChat(L"输入超过长度限制，未读取或解析任何部分；请先脱敏并缩短。"); break;
+            }
+            std::vector<wchar_t> buffer((size_t)length + 1);
+            const int copied = GetWindowTextW(g_input, buffer.data(), (int)buffer.size());
+            if (copied != length) { AppendChat(L"输入读取不完整，未解析；请重试。"); break; }
+            const std::wstring q(buffer.data(), (size_t)copied);
+            if (ProvidedFaultPrefixLength(q)) AppendChat(L"日志证据：仅分析显式提供的片段，不回显原文、不读取文件、不执行指令。");
+            else AppendChat(std::wstring(L"你：") + q);
             AppendChat(AnswerQuestion(q, g_snap));
             SetWindowTextW(g_input, L"");
         } else if (id == ID_BTN_CLEAN) {
