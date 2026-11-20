@@ -1,4 +1,7 @@
 #pragma once
+#ifndef WIN32_LEAN_AND_MEAN
+#define WIN32_LEAN_AND_MEAN
+#endif
 #ifndef NOMINMAX
 #define NOMINMAX
 #endif
@@ -9,12 +12,7 @@
 #include "types.h"
 #include "policy.h"
 #include "io_metrics.h"
-static ULONGLONG FileTimeToU64(const FILETIME& ft) {
-    ULARGE_INTEGER u;
-    u.LowPart = ft.dwLowDateTime;
-    u.HighPart = ft.dwHighDateTime;
-    return u.QuadPart;
-}
+#include "process_identity.h"
 
 struct CpuSample { ULONGLONG kernel, user, start; };
 
@@ -31,6 +29,8 @@ static void CollectProcesses(Snapshot& s) {
     std::map<std::wstring, ProcRow> groups;
 
     s.processes.clear();
+    s.processEnumerationComplete = false;
+    s.procCount = 0;
     FILETIME started{}; GetSystemTimeAsFileTime(&started);
     const auto snapshotStarted = FileTimeToU64(started);
     HANDLE snap = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0);
@@ -56,15 +56,16 @@ static void CollectProcesses(Snapshot& s) {
                 HANDLE h = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION | PROCESS_VM_READ, FALSE, pid);
                 if (!h) continue;   // 打不开就留着 start=0，结束前会因身份未知跳过
 
-                wchar_t imagePath[32768]{};
-                DWORD pathSize = 32768;
-                if (QueryFullProcessImageNameW(h, 0, imagePath, &pathSize))
-                    row.pids.back().path = Lower(imagePath);
+                ProcIdent observed; std::wstring identityWhy;
+                if (!ReadProcessIdentity(h, observed, identityWhy) || observed.pid != pid ||
+                    !AcceptSampleIdentity(observed.start, snapshotStarted, observed.path, key)) {
+                    CloseHandle(h); continue;
+                }
+                observed.parentPid = pe.th32ParentProcessID;
+                row.pids.back() = observed;
                 FILETIME ct{}, et{}, kt{}, ut{};
                 if (GetProcessTimes(h, &ct, &et, &kt, &ut)) {
-                    if (!AcceptSampleIdentity(FileTimeToU64(ct), snapshotStarted,
-                            row.pids.back().path, key)) { CloseHandle(h); continue; }
-                    row.pids.back().start = FileTimeToU64(ct);
+                    if (FileTimeToU64(ct) != observed.start) { CloseHandle(h); continue; }
                     CpuSample now{ FileTimeToU64(kt), FileTimeToU64(ut), FileTimeToU64(ct) };
                     curCpu[pid] = now;
                     auto it = prevCpu.find(pid);
@@ -74,6 +75,7 @@ static void CollectProcesses(Snapshot& s) {
                                              (now.user - it->second.user)) / 10000000.0;
                         if (ds >= 0) {
                             node.cpuPct = ds / elapsed / std::max(1u, (unsigned)sys.dwNumberOfProcessors) * 100.0;
+                            node.cpuSampleValid = true;
                             row.cpuPct += node.cpuPct;
                         }
                     }
@@ -95,7 +97,7 @@ static void CollectProcesses(Snapshot& s) {
                 PROCESS_MEMORY_COUNTERS_EX pmc{};
                 if (GetProcessMemoryInfo(h, (PROCESS_MEMORY_COUNTERS*)&pmc, sizeof(pmc))) {
                     double mb = pmc.WorkingSetSize / 1048576.0;
-                    row.memMB += mb; node.memMB = mb;
+                    row.memMB += mb; node.memMB = mb; node.memorySampleValid = row.pids.back().start != 0 && !row.pids.back().path.empty();
                     if (key == L"llama-server.exe") {
                         s.modelRunning = true;
                         s.modelMemGB += mb / 1024.0;
@@ -104,6 +106,10 @@ static void CollectProcesses(Snapshot& s) {
                 node.identity = row.pids.back();
                 CloseHandle(h);
             } while (Process32NextW(snap, &pe));
+            s.processEnumerationComplete = GetLastError() == ERROR_NO_MORE_FILES;
+        } else {
+            // An empty successful enumeration is distinct from access/API failure.
+            s.processEnumerationComplete = GetLastError() == ERROR_NO_MORE_FILES;
         }
         CloseHandle(snap);
         s.procCount = count;
